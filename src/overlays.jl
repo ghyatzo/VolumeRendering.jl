@@ -218,6 +218,80 @@ draw!(o::BoxOutlineOverlay, ctx::GeomContext) = (o.gr === nothing || draw!(o.gr,
 
 overlay_fingerprint(o::BoxOutlineOverlay) = (:boxoutline, o.region, o.color, o.enabled)
 
+# ── SphericalOutlineOverlay: latitude/longitude wireframe of a sphere, drawn as GL_LINES (via a
+# GeometryRenderer). `center === nothing` ⇒ region center at draw time. Lines are 1 device-px (the
+# GeometryRenderer convention, matching BoxOutlineOverlay); the VBO is rebuilt only when the
+# radius/center/resolution/color change.
+mutable struct SphericalOutlineOverlay <: Overlay
+    radius::Float64
+    center::Union{Nothing,NTuple{3,Float64}}   # nothing ⇒ bounds(ctx.region) center
+    n_lat::Int                                 # number of latitude rings (incl. equator if odd)
+    n_lon::Int                                 # number of longitude meridians (half great circles)
+    seg::Int                                   # segments per ring / meridian
+    color::NTuple{3,Float64}
+    enabled::Bool
+    gr::Union{Nothing,GeometryRenderer}
+    last::Any                                  # (center, radius, n_lat, n_lon, seg, color) built for
+end
+SphericalOutlineOverlay(; radius, center = nothing, n_lat = 3, n_lon = 6, seg = 64,
+                  color = (0.5, 0.5, 0.55), enabled = true) =
+    SphericalOutlineOverlay(Float64(radius),
+                      center === nothing ? nothing : NTuple{3,Float64}(center),
+                      Int(n_lat), Int(n_lon), Int(seg),
+                      NTuple{3,Float64}(color), enabled, nothing, nothing)
+
+enabled(o::SphericalOutlineOverlay) = o.enabled
+
+# Interleaved (x,y,z, r,g,b) vertices for `n_lon` meridians (half great circles from north to south
+# pole, equally spaced in azimuth) plus `n_lat` latitude rings (small circles at polar angles
+# π·j/(n_lat+1), j=1..n_lat — symmetric about the equator and skipping the degenerate poles).
+# Drawn as GL_LINES, so every consecutive pair of vertices is one segment.
+function _wiresphere_verts(center, radius::Real, n_lat::Int, n_lon::Int, seg::Int, color)
+    r, g, b = Float32.(color)
+    cx, cy, cz = Float32.(center)
+    R = Float32(radius)
+    out = Float32[]
+    sizehint!(out, 6 * 2 * seg * (n_lat + n_lon))
+    # Meridians: t ∈ [0, π] traces a half great circle at fixed azimuth θ.
+    for i in 1:n_lon
+        θ = 2π * (i - 1) / n_lon
+        cosθ, sinθ = cos(θ), sin(θ)
+        for k in 0:(seg - 1)
+            t1 = π * k / seg;       t2 = π * (k + 1) / seg
+            s1, c1 = sin(t1), cos(t1);   s2, c2 = sin(t2), cos(t2)
+            push!(out, cx + R * s1 * cosθ, cy + R * s1 * sinθ, cz + R * c1, r, g, b,
+                       cx + R * s2 * cosθ, cy + R * s2 * sinθ, cz + R * c2, r, g, b)
+        end
+    end
+    # Latitude rings: small circle at polar angle φ (constant z = cz + R·cos φ, radius R·sin φ).
+    for j in 1:n_lat
+        φ = π * j / (n_lat + 1)
+        rr = R * sin(φ);           zz = cz + R * cos(φ)
+        for k in 0:(seg - 1)
+            θ1 = 2π * k / seg;      θ2 = 2π * (k + 1) / seg
+            push!(out, cx + rr * cos(θ1), cy + rr * sin(θ1), zz, r, g, b,
+                       cx + rr * cos(θ2), cy + rr * sin(θ2), zz, r, g, b)
+        end
+    end
+    out
+end
+
+function refresh!(o::SphericalOutlineOverlay, ctx::GeomContext)
+    o.gr === nothing && (o.gr = GeometryRenderer())
+    ctr = o.center === nothing ? NTuple{3,Float64}(Tuple(bounds(ctx.region)[1])) : o.center
+    key = (ctr, o.radius, o.n_lat, o.n_lon, o.seg, o.color)
+    if key != o.last
+        upload!(o.gr, _wiresphere_verts(ctr, o.radius, o.n_lat, o.n_lon, o.seg, o.color))
+        o.last = key
+    end
+    o
+end
+
+draw!(o::SphericalOutlineOverlay, ctx::GeomContext) = (o.gr === nothing || draw!(o.gr, ctx.viewproj); o)
+
+overlay_fingerprint(o::SphericalOutlineOverlay) =
+    (:wiresphere, o.center, o.radius, o.n_lat, o.n_lon, o.seg, o.color, o.enabled)
+
 # ── StreamlinesOverlay: evenly-spaced field lines of a VectorField, colored by |V| ──
 mutable struct StreamlinesOverlay <: Overlay
     vf::VectorField

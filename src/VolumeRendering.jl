@@ -26,6 +26,7 @@ export orbit!, flylook!, pan!, zoom!, fly!, reset!, view_proj
 # overlay protocol + concrete overlays:
 export Overlay, enabled, refresh!, draw!, aabb
 export SliceOverlay, BoxOutlineOverlay, SphereOverlay, LineOverlay, AxesOverlay
+export SphericalOutlineOverlay
 export StreamlinesOverlay, GlyphsOverlay, default_overlays
 # vector fields:
 export VectorField, compute_streamlines

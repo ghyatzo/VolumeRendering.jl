@@ -8,6 +8,7 @@ using CImGui.CSyntax          # @c — pass Ref pointers to the widget wrappers
 import ColorSchemes
 import ImPlotExtra
 
+
 const _MODES = (("DVR", "direct volume rendering (emission-absorption)"),
                 ("MIP", "maximum intensity projection"),
                 ("avg", "average intensity"))

@@ -101,7 +101,8 @@ VolumeRendering.axis_index_glsl(k::UniformAxis, c) = "((" * c * ") - " * repr(k.
             A = KeyedArray(gaussian(xs, ys, zs); x = xs, y = ys, z = zs)
             vf = VectorField(p -> SVector(-p[2], p[1], 0.2); region = BoxRegion((-1.,-1.,-1.), (1.,1.,1.)))
             ovs = Overlay[SliceOverlay(:z), BoxOutlineOverlay(), SphereOverlay(radius = 0.4),
-                          AxesOverlay(), StreamlinesOverlay(vf), GlyphsOverlay(vf; every = 8)]
+                          AxesOverlay(), SphericalOutlineOverlay(radius = 0.6; n_lat = 3, n_lon = 6),
+                          StreamlinesOverlay(vf), GlyphsOverlay(vf; every = 8)]
             _, b = renderbuf(FieldView(A; overlays = ovs), W)
             @test GL.glGetError() == 0
             @test litfrac(b) > 0.05
