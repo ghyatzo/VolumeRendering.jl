@@ -218,6 +218,80 @@ draw!(o::BoxOutlineOverlay, ctx::GeomContext) = (o.gr === nothing || draw!(o.gr,
 
 overlay_fingerprint(o::BoxOutlineOverlay) = (:boxoutline, o.region, o.color, o.enabled)
 
+# ── SphericalSliceOverlay: spherical "slice" — analytic ray/sphere impostor over the fullscreen
+# triangle, sampling the field on the sphere of `radius` at `center`. `center === nothing` ⇒ region
+# center at draw time. Two independent, composable flags:
+#   show_surface  → TF-colored shell (like SliceOverlay, but on a sphere instead of a plane).
+#   show_iso      → continuous iso-contour band: a Gaussian α = exp(-(v-v0)² / 2σ²) centered on
+#                   `iso_value` (field units), painted in `iso_color`. When both flags are on the band
+#                   is composited over the TF shell in-shader (per-fragment `mix`, no GL blending);
+#                   iso-only mode discards off-band fragments so only the contour remains.
+# Always opaque — writes depth (inc_depth.glsl), so it occludes / is occluded like any geometry. The
+# program is per-field (injects the field GLSL) and rebuilt when the field's GLSL changes (`built_for`).
+mutable struct SphericalSliceOverlay <: Overlay
+    radius::Float64
+    center::Union{Nothing,NTuple{3,Float64}}   # nothing ⇒ bounds(ctx.region) center
+    show_surface::Bool
+    show_iso::Bool
+    iso_value::Float64
+    iso_sigma::Float64                          # Gaussian width, in field units
+    iso_color::NTuple{3,Float64}
+    enabled::Bool
+    prog::UInt32
+    vao::UInt32
+    built_for::Union{Nothing,String}
+end
+SphericalSliceOverlay(; radius, center = nothing, show_surface = true, show_iso = false,
+                   iso_value = 0.0, iso_sigma = 0.05, iso_color = (1.0, 0.85, 0.2),
+                   enabled = true) =
+    SphericalSliceOverlay(Float64(radius),
+                       center === nothing ? nothing : NTuple{3,Float64}(center),
+                       Bool(show_surface), Bool(show_iso),
+                       Float64(iso_value), Float64(iso_sigma),
+                       NTuple{3,Float64}(iso_color), enabled,
+                       UInt32(0), UInt32(0), nothing)
+
+enabled(o::SphericalSliceOverlay) = o.enabled
+
+function refresh!(o::SphericalSliceOverlay, ctx::GeomContext)
+    o.vao == 0 && (o.vao = _new_vao())
+    fg = field_glsl_full(ctx.field)
+    if fg != o.built_for
+        o.prog != 0 && GL.glDeleteProgram(o.prog)
+        vsrc = read(joinpath(SHADER_DIR, "volume.vert"), String)        # fullscreen triangle
+        fsrc = read(joinpath(SHADER_DIR, "sphere_slice.frag"), String)
+        o.prog = link_program_src(vsrc, fsrc; includes = Dict{String,String}("field" => fg))
+        o.built_for = fg
+    end
+    o
+end
+
+function draw!(o::SphericalSliceOverlay, ctx::GeomContext)
+    ctr = o.center
+    if ctr === nothing
+        ctr = NTuple{3,Float64}(Tuple(bounds(ctx.region)[1]))   # AxesOverlay / WireSphere pattern
+    end
+    GL.glUseProgram(o.prog); GL.glBindVertexArray(o.vao)
+    set_camera_uniforms!(o.prog, ctx.cam, ctx.aspect)
+    uni_m4(o.prog, "viewProj", ctx.viewproj)
+    uni_3f(o.prog, "sphereCenter", ctr...)
+    uni_f(o.prog, "sphereRadius", o.radius)
+    uni_i(o.prog, "interp", ctx.params.interp)
+    uni_i(o.prog, "showSurface", o.show_surface ? 1 : 0)
+    uni_i(o.prog, "showIso",     o.show_iso     ? 1 : 0)
+    uni_f(o.prog, "isoValue", o.iso_value)
+    uni_f(o.prog, "isoSigma", o.iso_sigma)
+    uni_3f(o.prog, "isoColor", o.iso_color...)
+    bind_field!(ctx.gpu, o.prog)
+    bind_tf_uniforms!(o.prog, ctx.tf)
+    GL.glDrawArrays(GL.GL_TRIANGLES, 0, 3)
+    o
+end
+
+overlay_fingerprint(o::SphericalSliceOverlay) =
+    (:radialslice, o.center, o.radius, o.show_surface, o.show_iso,
+     o.iso_value, o.iso_sigma, o.iso_color, o.enabled)
+
 # ── StreamlinesOverlay: evenly-spaced field lines of a VectorField, colored by |V| ──
 mutable struct StreamlinesOverlay <: Overlay
     vf::VectorField
