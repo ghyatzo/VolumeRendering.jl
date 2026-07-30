@@ -2,6 +2,7 @@
 # CImGui-free so the whole render path is testable in a headless GLFW context.
 
 import ModernGL as GL
+using ColorTypes, FixedPointNumbers
 
 const SHADER_DIR = joinpath(@__DIR__, "shaders")
 
@@ -64,6 +65,30 @@ function tex3d_r32f(data::AbstractArray{<:Real,3};
     GL.glTexParameteri(GL.GL_TEXTURE_3D, GL.GL_TEXTURE_WRAP_T, wrap[2])
     GL.glTexParameteri(GL.GL_TEXTURE_3D, GL.GL_TEXTURE_WRAP_R, wrap[3])
     GL.glTexImage3D(GL.GL_TEXTURE_3D, 0, GL.GL_R32F, w, h, d, 0, GL.GL_RED, GL.GL_FLOAT, arr)
+    id[]
+end
+
+# RGBA 3D texture from a Colorant grid; precision follows eltype (N0f8→RGBA8, float→RGBA32F). Same
+# conventions as `tex3d_r32f`. Colorant memory is (r,g,b,a) per element, matching the GL_RGBA upload.
+function tex3d_rgba(data::AbstractArray{<:Colorant,3};
+                    wrap = (GL.GL_CLAMP_TO_EDGE, GL.GL_CLAMP_TO_EDGE, GL.GL_CLAMP_TO_EDGE),
+                    filter = GL.GL_LINEAR)
+    dense = data isa Array ? data : Array(data)              # materialize KeyedArray → plain Array
+    if eltype(eltype(dense)) <: AbstractFloat
+        arr = eltype(dense) === RGBA{Float32} ? dense : RGBA{Float32}.(dense)
+        internal, gltype = GL.GL_RGBA32F, GL.GL_FLOAT
+    else                                                     # fixed-point (N0f8, …) → 8-bit
+        arr = eltype(dense) === RGBA{N0f8} ? dense : RGBA{N0f8}.(dense)
+        internal, gltype = GL.GL_RGBA8, GL.GL_UNSIGNED_BYTE
+    end
+    w, h, d = size(arr)
+    id = Ref{GL.GLuint}(0); GL.glGenTextures(1, id); GL.glBindTexture(GL.GL_TEXTURE_3D, id[])
+    GL.glTexParameteri(GL.GL_TEXTURE_3D, GL.GL_TEXTURE_MIN_FILTER, filter)
+    GL.glTexParameteri(GL.GL_TEXTURE_3D, GL.GL_TEXTURE_MAG_FILTER, filter)
+    GL.glTexParameteri(GL.GL_TEXTURE_3D, GL.GL_TEXTURE_WRAP_S, wrap[1])
+    GL.glTexParameteri(GL.GL_TEXTURE_3D, GL.GL_TEXTURE_WRAP_T, wrap[2])
+    GL.glTexParameteri(GL.GL_TEXTURE_3D, GL.GL_TEXTURE_WRAP_R, wrap[3])
+    GC.@preserve arr GL.glTexImage3D(GL.GL_TEXTURE_3D, 0, internal, w, h, d, 0, GL.GL_RGBA, gltype, pointer(arr))
     id[]
 end
 

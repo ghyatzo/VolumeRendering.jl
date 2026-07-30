@@ -4,6 +4,7 @@
 
 using Test
 using VolumeRendering, AxisKeys, StaticArrays
+using ColorTypes, FixedPointNumbers
 import GLFW, ModernGL as GL
 
 # ── headless GL context + pixel readback helpers ──
@@ -57,6 +58,25 @@ VolumeRendering.axis_index_glsl(k::UniformAxis, c) = "((" * c * ") - " * repr(k.
             lum = sum(Int.(b[1:3, :, :]); dims = 1)[1, :, :]
             left = sum(@view lum[1:W÷2, :]); right = sum(@view lum[W÷2+1:W, :])
             @test right > 3 * max(left, 1)                      # +x maps to camera-right
+        end
+
+        @testset "RGBA color field: intrinsic color + placement" begin
+            # red where x>0, green where x<0; the field carries its own color (no colormap).
+            grid = [RGBA{N0f8}(x > 0 ? 1.0 : 0.0, x > 0 ? 0.0 : 1.0, 0.0, 0.5) for x in xs, y in ys, z in zs]
+            A = KeyedArray(grid; x = xs, y = ys, z = zs)
+            @test uses_transfer_function(A) == false
+            v = FieldView(A)
+            v.camera.projection = :ortho
+            v.camera.eye = SVector(0.0, 0.0, 3.0); v.camera.lookat = SVector(0.0, 0.0, 0.0)
+            v.camera.up = SVector(0.0, 1.0, 0.0); v.camera.ortho_half = 1.2
+            _, b = renderbuf(v, W)
+            @test GL.glGetError() == 0
+            @test litfrac(b) > 0.02
+            R, G = Int.(b[1, :, :]), Int.(b[2, :, :])
+            rR, rG = sum(@view R[W÷2+1:W, :]), sum(@view G[W÷2+1:W, :])   # +x half (camera-right)
+            lR, lG = sum(@view R[1:W÷2, :]),   sum(@view G[1:W÷2, :])     # -x half
+            @test rR > 3 * max(rG, 1)     # right half is red
+            @test lG > 3 * max(lR, 1)     # left half is green
         end
 
         @testset "GLSLField (analytic) + SphereRegion" begin

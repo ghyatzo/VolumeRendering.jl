@@ -79,19 +79,25 @@ function _tf_colorbar!(tf::TransferFunction, width::Real)
     nothing
 end
 
-# Emit the controls into the current ImGui window (no Begin/End of its own).
+# Emit the controls into the current ImGui window (no Begin/End of its own). Built per field kind:
+# color (RGBA) fields omit the mode selector + Transfer-function section and render DVR-only.
 function ShowControls(view::FieldView)
     _ensure_implot!()
     params = view.params; tf = view.tf; cam = view.camera
-    vmin, vmax = value_range(view.field)
     hw = (CImGui.GetContentRegionAvail().x - 6) / 2   # half content width, for paired items
+    tf_field = uses_transfer_function(view.field)
 
     CImGui.SeparatorText("Rendering")
-    let sel = _radio_row("mode", _MODES, params.mode)
-        sel !== nothing && (params.mode = sel)
+    if tf_field
+        let sel = _radio_row("mode", _MODES, params.mode)
+            sel !== nothing && (params.mode = sel)
+        end
+    else
+        params.mode = 0
     end
     if params.mode == 0
-        CImGui.SameLine(); CImGui.SetNextItemWidth(hw)
+        tf_field && CImGui.SameLine()
+        CImGui.SetNextItemWidth(hw)
         let v = Ref(Cfloat(params.opacity_scale))
             (@c CImGui.SliderFloat("##opacity", &v[], 0.02f0, 5.0f0, "opacity: %.2f",
                                    CImGui.ImGuiSliderFlags_Logarithmic)) && (params.opacity_scale = v[])
@@ -113,13 +119,16 @@ function ShowControls(view::FieldView)
         (@c CImGui.Checkbox("trilinear (vs nearest)", &v[])) && (params.interp = v[] ? 1 : 0)
     end
 
-    CImGui.SeparatorText("Transfer function")
-    _colormap_buttons!(tf)
-    let v = Ref(tf.logscale)
-        (@c CImGui.Checkbox("log scale", &v[])) &&
-            (tf.logscale = v[]; default_window!(tf, (vmin, vmax)))
+    if tf_field
+        vmin, vmax = value_range(view.field)
+        CImGui.SeparatorText("Transfer function")
+        _colormap_buttons!(tf)
+        let v = Ref(tf.logscale)
+            (@c CImGui.Checkbox("log scale", &v[])) &&
+                (tf.logscale = v[]; default_window!(tf, (vmin, vmax)))
+        end
+        _tf_colorbar!(tf, CImGui.GetContentRegionAvail().x)
     end
-    _tf_colorbar!(tf, CImGui.GetContentRegionAvail().x)
 
     CImGui.SeparatorText("View")
     let sel = _radio_row("proj", (("perspective", nothing), ("ortho", nothing)),

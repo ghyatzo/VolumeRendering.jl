@@ -10,9 +10,9 @@ in vec2 vuv;
 out vec4 frag;
 
 //#include "inc_camera.glsl"
+//#include "inc_tf.glsl"
 //#include "field"
 //#include "region"
-//#include "inc_tf.glsl"
 
 uniform int   mode;          // 0 = emission-absorption (DVR), 1 = MIP, 2 = average
 uniform float opacityScale;  // DVR extinction per unit length (σ = tfAlpha·opacityScale)
@@ -64,17 +64,16 @@ void main() {
         for (int s = 0; s < steps && t < tfar; s++) {
             vec3 pos = ro + rd * t;
             float dt = stepScale * stepSize(pos);
-            float v = sampleField(pos);
             if (mode == 0) {                               // emission-absorption (DVR)
-                vec4 c = tf(v);
+                vec4 c = sample4(pos);                     // color+opacity: tf(v) for scalar, (rgb,a) for RGBA
                 float av = 1.0 - exp(-c.a * opacityScale * dt);   // dt-correct opacity → step-count invariant
                 col   += (1.0 - alpha) * av * c.rgb;
                 alpha += (1.0 - alpha) * av;
                 if (alpha > 0.995) break;
             } else if (mode == 1) {                        // MIP
-                vmax = max(vmax, v);
+                vmax = max(vmax, sampleField(pos));
             } else {                                       // average
-                vsum += v * dt; vlen += dt;                // dt-weighted spatial mean (spacing varies)
+                vsum += sampleField(pos) * dt; vlen += dt; // dt-weighted spatial mean (spacing varies)
             }
             t += dt;
         }

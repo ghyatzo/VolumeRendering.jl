@@ -103,7 +103,7 @@ end
 # e.g. `view.field = other`. Must be called with a current GL context.
 function _ensure_built!(view::FieldView)
     view.vr === nothing && (view.vr = VolumeRenderer())
-    fg = field_glsl(view.field); rg = region_glsl(view.region)
+    fg = field_glsl_full(view.field); rg = region_glsl(view.region)
     if view.built_for != (fg, rg)
         view.vr.volprog != 0 && GL.glDeleteProgram(view.vr.volprog)
         vsrc = read(joinpath(SHADER_DIR, "volume.vert"), String)

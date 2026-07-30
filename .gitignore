@@ -1,2 +1,5 @@
 Manifest.toml
+!examples/Manifest.toml
 SPEC.md
+examples/milkyway/*.raw
+examples/imgui.ini

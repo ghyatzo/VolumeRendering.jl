@@ -19,6 +19,7 @@ export FieldSource, GLSLField, axis_index_glsl
 export Region, BoxRegion, SphereRegion
 # interface functions users overload for custom sources / regions:
 export field_glsl, region, value_range, fingerprint, upload_field, bind_field!, free_field!
+export uses_transfer_function
 export region_glsl, bind_region!, bounds
 # camera controls (host wires input to these):
 export orbit!, flylook!, pan!, zoom!, fly!, reset!, view_proj

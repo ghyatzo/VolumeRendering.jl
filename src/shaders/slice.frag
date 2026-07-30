@@ -4,9 +4,9 @@
 in vec3 worldPos;
 out vec4 frag;
 
-//#include "field"
 //#include "inc_tf.glsl"
+//#include "field"
 
 void main() {
-    frag = vec4(tf(sampleField(worldPos)).rgb, 1.0);
+    frag = vec4(sample4(worldPos).rgb, 1.0);
 }

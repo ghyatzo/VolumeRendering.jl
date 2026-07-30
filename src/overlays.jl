@@ -34,7 +34,7 @@ enabled(o::SliceOverlay) = o.enabled
 
 function refresh!(o::SliceOverlay, ctx::GeomContext)
     o.vao == 0 && (o.vao = _new_vao())
-    fg = field_glsl(ctx.field)
+    fg = field_glsl_full(ctx.field)
     if fg != o.built_for
         o.prog != 0 && GL.glDeleteProgram(o.prog)
         vsrc = read(joinpath(SHADER_DIR, "slice.vert"), String)
