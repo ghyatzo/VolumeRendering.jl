@@ -28,18 +28,16 @@ struct GeomContext
 end
 
 # All shader-driving state that isn't the camera, transfer function, field, or region.
-mutable struct RenderParams
-    mode::Int               # 0 emission-absorption, 1 MIP, 2 average
-    interp::Int             # 0 nearest, 1 trilinear (the field snippet may honor this)
-    step_scale::Float64     # adaptive step dt = step_scale · stepSize(pos) — quality knob
-    opacity_scale::Float64  # DVR extinction per unit length
-    max_render_px::Int      # cap the VOLUME long side; geometry/composite are always full res
-    flymode::Bool
-    fly_speed::Float64
+@kwdef mutable struct RenderParams
+    mode::Int = 0               # 0 emission-absorption, 1 MIP, 2 average
+    interp::Int = 1             # 0 nearest, 1 trilinear (the field snippet may honor this)
+    step_scale::Float64 = 0.5   # adaptive step dt = step_scale · stepSize(pos) — quality knob
+    opacity_scale::Float64 = 1.0  # DVR extinction per unit length
+    max_render_px::Int = 2048   # cap the VOLUME long side; geometry/composite are always full res
+    refine_samples::Int = 16    # jittered frames averaged while idle for progressive refinement; 1 disables it
+    flymode::Bool = false
+    fly_speed::Float64 = 0.25
 end
-RenderParams(; mode = 0, interp = 1, step_scale = 0.5, opacity_scale = 1.0,
-             max_render_px = 2048, flymode = false, fly_speed = 0.25) =
-    RenderParams(mode, interp, step_scale, opacity_scale, max_render_px, flymode, fly_speed)
 
 # ── shared per-program uniform groups ──
 function set_camera_uniforms!(prog, cam::Camera, aspect)
@@ -63,11 +61,14 @@ mutable struct VolumeRenderer
     vao::UInt32              # shared fullscreen-triangle VAO
     geom_fb::Framebuffer     # full device-res: color + sampleable depth texture (the G-buffer)
     vol_fb::Framebuffer      # low-res: premultiplied color
+    accum_fb::Framebuffer    # full-res RGBA16F: running average of composited frames (progressive refinement)
+    nsamp::Int               # frames already averaged into accum_fb for the current render_key
 end
 function VolumeRenderer()
     compprog = link_program("volume.vert", "composite.frag")
     vao = Ref{GL.GLuint}(0); GL.glGenVertexArrays(1, vao)
-    VolumeRenderer(0, compprog, vao[], Framebuffer(16, 16; depth = :texture), Framebuffer(16, 16))
+    VolumeRenderer(0, compprog, vao[], Framebuffer(16, 16; depth = :texture), Framebuffer(16, 16),
+                   Framebuffer(16, 16; color = :rgba16f), 0)
 end
 
 _default_region(field) = region(field)   # avoids the `region` accessor being shadowed by the kwarg
@@ -129,6 +130,7 @@ render_key(view::FieldView, gw, gh, vw, vh) = hash((
     view.camera.eye, view.camera.lookat, view.camera.up, view.camera.projection,
     view.camera.fov, view.camera.ortho_half,
     view.params.mode, view.params.interp, view.params.step_scale, view.params.opacity_scale,
+    view.params.refine_samples,
     fingerprint(view.field), fingerprint(view.region),
     view.tf.colormap, view.tf.logscale, view.tf.lo, view.tf.hi, view.tf.opacity_pts,
     Tuple(overlay_fingerprint(o) for o in view.overlays),
@@ -142,18 +144,30 @@ function geometry_pass!(view::FieldView, ctx::GeomContext)
     end
 end
 
-# Render one frame at geometry size gw×gh and volume size vw×vh; returns the G-buffer color texture id.
-# Each pass sets all the GL state it depends on (defensive for multi-view / arbitrary host state), and
-# the previously-bound framebuffer is restored on return.
+# Render one frame at geometry size gw×gh and volume size vw×vh; returns the color texture to display —
+# the running-average accum_fb while refining, else the G-buffer. Each pass sets all the GL state it
+# depends on (defensive for multi-view / arbitrary host state); the previously-bound FB is restored.
+#
+# Progressive refinement: while the render_key is unchanged, successive frames re-march with a shifted
+# jitter (sampleIdx) and fold into accum_fb's running average, converging the jitter noise over
+# refine_samples frames. Any input change bumps the key → nsamp resets → the average restarts.
 function render_frame!(view::FieldView, gw, gh, vw, vh)
     key = render_key(view, gw, gh, vw, vh)
-    key == view.last_key[] && return view.vr.geom_fb.tex
-    view.last_key[] = key
+    vr = view.vr
+    @assert view.params.refine_samples >= 1 "refine_samples must be ≥ 1"
+    nmax = view.params.refine_samples
+    refining = nmax > 1
+    # Nothing changed and the target sample count reached → the finished image is already cached.
+    key == view.last_key[] && vr.nsamp >= nmax && return refining ? vr.accum_fb.tex : vr.geom_fb.tex
+    if key != view.last_key[]
+        view.last_key[] = key
+        vr.nsamp = 0
+    end
 
     ensure_baked!(view.tf)
     prev_fbo = Ref{GL.GLint}(0); GL.glGetIntegerv(GL.GL_FRAMEBUFFER_BINDING, prev_fbo)
-    vr = view.vr
     resize!(vr.geom_fb, gw, gh); resize!(vr.vol_fb, vw, vh)
+    refining && resize!(vr.accum_fb, gw, gh)
     aspect = gw / gh
     center, radius = bounds(view.region)
     vpm = view_proj(view.camera, center, radius, aspect)
@@ -186,6 +200,7 @@ function render_frame!(view::FieldView, gw, gh, vw, vh)
     uni_f(vr.volprog, "stepScale", view.params.step_scale)
     uni_m4(vr.volprog, "invViewProj", ivp)
     uni_2i(vr.volprog, "geomSize", gw, gh); uni_2i(vr.volprog, "volSize", vw, vh)
+    uni_i(vr.volprog, "sampleIdx", vr.nsamp)
     bind_sampler(vr.volprog, "geomDepthTex", 15, GL.GL_TEXTURE_2D, vr.geom_fb.depth)
     GL.glDrawArrays(GL.GL_TRIANGLES, 0, 3)
 
@@ -197,14 +212,33 @@ function render_frame!(view::FieldView, gw, gh, vw, vh)
     bind_sampler(vr.compprog, "volTex", 0, GL.GL_TEXTURE_2D, vr.vol_fb.tex)
     GL.glDrawArrays(GL.GL_TRIANGLES, 0, 3)
     GL.glDisable(GL.GL_BLEND)
+    vr.nsamp += 1
+
+    # ── Pass 4: fold the freshly composited frame into accum_fb's running average (only while refining) ──
+    if refining
+        GL.glBindFramebuffer(GL.GL_FRAMEBUFFER, vr.accum_fb.fbo); GL.glViewport(0, 0, gw, gh)
+        GL.glDisable(GL.GL_SCISSOR_TEST); GL.glDisable(GL.GL_CULL_FACE); GL.glDisable(GL.GL_DEPTH_TEST)
+        GL.glUseProgram(vr.compprog); GL.glBindVertexArray(vr.vao)
+        bind_sampler(vr.compprog, "volTex", 0, GL.GL_TEXTURE_2D, vr.geom_fb.tex)
+        if vr.nsamp == 1
+            GL.glDisable(GL.GL_BLEND)                          # first frame: overwrite (also clears stale float)
+        else
+            GL.glEnable(GL.GL_BLEND)                           # accum ← mix(accum, frame, 1/n): equal-weight mean
+            GL.glBlendColor(0f0, 0f0, 0f0, 1f0 / vr.nsamp)
+            GL.glBlendFunc(GL.GL_CONSTANT_ALPHA, GL.GL_ONE_MINUS_CONSTANT_ALPHA)
+        end
+        GL.glDrawArrays(GL.GL_TRIANGLES, 0, 3)
+        GL.glDisable(GL.GL_BLEND)
+    end
 
     GL.glBindFramebuffer(GL.GL_FRAMEBUFFER, prev_fbo[])
-    vr.geom_fb.tex
+    refining ? vr.accum_fb.tex : vr.geom_fb.tex
 end
 
-# Public L1 entry point: render the view at `w`×`h` device pixels; returns the G-buffer color texture
-# id (RGBA8). The VOLUME long side is capped at `params.max_render_px` (geometry stays full-res). A
-# current GL context is required; GL resources are allocated on the first call.
+# Public L1 entry point: render the view at `w`×`h` device pixels; returns the color texture to display
+# (the RGBA16F progressive-refinement average while refining, else the RGBA8 G-buffer). The VOLUME long
+# side is capped at `params.max_render_px` (geometry stays full-res). A current GL context is required;
+# GL resources are allocated on the first call.
 function render!(view::FieldView, w::Integer, h::Integer)
     _ensure_built!(view)
     gw = max(1, Int(w)); gh = max(1, Int(h))

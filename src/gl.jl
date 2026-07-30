@@ -123,14 +123,15 @@ update_tf!(id, data::Matrix{Float32}) = (GL.glBindTexture(GL.GL_TEXTURE_2D, id);
 # target). (Verified on this GL 4.1-over-Metal: depth-texture FBO is complete and samples as raw depth.)
 mutable struct Framebuffer
     fbo::GL.GLuint
-    tex::GL.GLuint          # RGBA8 color
+    tex::GL.GLuint          # color texture, RGBA8 or RGBA16F per `colormode`
     depth::GL.GLuint        # depth texture id, or 0 when depthmode == :none
     depthmode::Symbol       # :none | :texture
+    colormode::Symbol       # :rgba8 | :rgba16f
     w::Int
     h::Int
 end
-function Framebuffer(w, h; depth::Symbol = :none)
-    fb = Framebuffer(0, 0, 0, depth, 0, 0)
+function Framebuffer(w, h; depth::Symbol = :none, color::Symbol = :rgba8)
+    fb = Framebuffer(0, 0, 0, depth, color, 0, 0)
     r = Ref{GL.GLuint}(0); GL.glGenFramebuffers(1, r); fb.fbo = r[]
     resize!(fb, w, h)
     fb
@@ -139,8 +140,9 @@ function Base.resize!(fb::Framebuffer, w, h)
     (w == fb.w && h == fb.h) && return fb
     fb.tex   != 0 && GL.glDeleteTextures(1, Ref(fb.tex))
     fb.depth != 0 && GL.glDeleteTextures(1, Ref(fb.depth))
+    internal, gltype = fb.colormode === :rgba16f ? (GL.GL_RGBA16F, GL.GL_FLOAT) : (GL.GL_RGBA8, GL.GL_UNSIGNED_BYTE)
     t = Ref{GL.GLuint}(0); GL.glGenTextures(1, t); GL.glBindTexture(GL.GL_TEXTURE_2D, t[])
-    GL.glTexImage2D(GL.GL_TEXTURE_2D, 0, GL.GL_RGBA8, w, h, 0, GL.GL_RGBA, GL.GL_UNSIGNED_BYTE, C_NULL)
+    GL.glTexImage2D(GL.GL_TEXTURE_2D, 0, internal, w, h, 0, GL.GL_RGBA, gltype, C_NULL)
     GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_MIN_FILTER, GL.GL_LINEAR)
     GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_MAG_FILTER, GL.GL_LINEAR)
     GL.glBindFramebuffer(GL.GL_FRAMEBUFFER, fb.fbo)

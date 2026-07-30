@@ -22,6 +22,7 @@ uniform mat4  invViewProj;   // unproject sampled scene depth → world (matches
 uniform sampler2D geomDepthTex;   // full-res geometry depth; clip the march at it
 uniform ivec2 geomSize;      // full-res geometry-pass size (gw,gh)
 uniform ivec2 volSize;       // this pass's low-res size (vw,vh)
+uniform int   sampleIdx;     // progressive-refinement frame index (0-based); shifts the jitter per frame
 
 // pcg2d hash — Jarzynski & Olano, "Hash Functions for GPU Rendering" (JCGT 2020).
 // High-quality, structure-free per-pixel white noise; no sin/fract, so no diagonal/moiré
@@ -69,9 +70,12 @@ void main() {
         // spacing tracks it: dt = stepScale·stepSize(pos). One law resolves fine regions and stops
         // over-sampling coarse ones; `steps` is only a cap. stepSize already encapsulates any floor, so
         // rays never take vanishing steps.
-        // Deterministic per-pixel jitter offsets the first sample by a sub-step so the sampling lattice
-        // shows up as (stable, frame-invariant) fine noise instead of coherent banding / ringing.
-        float jitter = hash12(uvec2(gl_FragCoord.xy));
+        // Per-pixel jitter offsets the first sample by a sub-step so the sampling lattice shows up as
+        // fine noise instead of coherent banding / ringing. Successive refinement frames shift the offset
+        // by a van der Corput (base 2) sequence, rotated per-pixel by the hash, so their average (folded
+        // in by the renderer) stratifies the sub-step and converges the noise away ~1/N.
+        float vdc    = float(bitfieldReverse(uint(sampleIdx))) * 2.3283064365386963e-10;   // /2^32
+        float jitter = fract(vdc + hash12(uvec2(gl_FragCoord.xy)));
         float t = tn + jitter * (stepScale * stepSize(ro + rd * tn));
         for (int s = 0; s < steps && t < tfar; s++) {
             vec3 pos = ro + rd * t;
