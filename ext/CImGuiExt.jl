@@ -1,11 +1,11 @@
-# The one piece of UI the package ships: `show!(view; size)` — draw a FieldView as an interactive
+# The one piece of UI the package ships: `ShowField(view; size)` — draw a FieldView as an interactive
 # image inside the host's current CImGui window/layout, and turn mouse/keyboard into camera moves.
 # Loaded automatically when a host `using`s both VolumeFields and CImGui. The core has no CImGui dep.
 
 module CImGuiExt
 
 using VolumeFields
-import VolumeFields: show!, orbit!, flylook!, pan!, zoom!, fly!
+import VolumeFields: ShowField, orbit!, flylook!, pan!, zoom!, fly!
 import ModernGL as GL
 import CImGui
 using CImGui: ImVec2
@@ -26,7 +26,7 @@ _drag(view::FieldView) = get!(() -> _Drag(false, false), _DRAG, view)
 # negative = fill the content region, positive = explicit px, 0 = default). Renders at device
 # resolution (logical size × DisplayFramebufferScale), shows the G-buffer texture V-flipped, and wires
 # camera input scoped to this view's id (so multiple views — even in one window — don't collide).
-function VolumeFields.show!(view::FieldView; size::ImVec2 = ImVec2(-CImGui.FLT_MIN, -CImGui.FLT_MIN))
+function VolumeFields.ShowField(view::FieldView; size::ImVec2 = ImVec2(-CImGui.FLT_MIN, -CImGui.FLT_MIN))
     sz = CImGui.CalcItemSize(size, 256.0, 256.0)                 # 256² default if a component is 0
     dw = max(1, round(Int, sz.x)); dh = max(1, round(Int, sz.y)) # on-screen logical points
     fbs = unsafe_load(CImGui.GetIO().DisplayFramebufferScale)    # Retina: (2,2)

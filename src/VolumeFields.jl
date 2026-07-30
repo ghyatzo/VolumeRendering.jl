@@ -29,8 +29,8 @@ export VectorField, compute_streamlines
 
 # The interactive view widget. The ONLY UI the package ships; its method lives in the CImGui
 # extension (ext/CImGuiExt.jl), so the core carries no CImGui dependency. A host that
-# `using`s CImGui gets `show!(view; size)` automatically.
-function show! end
-export show!
+# `using`s CImGui gets `ShowField(view; size)` automatically.
+function ShowField end
+export ShowField
 
 end # module VolumeFields
