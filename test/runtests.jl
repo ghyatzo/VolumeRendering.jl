@@ -111,3 +111,11 @@ VolumeRendering.axis_index_glsl(k::UniformAxis, c) = "((" * c * ") - " * repr(k.
         end
     end
 end
+
+import Aqua
+import CompatHelperLocal as CHL
+@testset "_" begin
+    Aqua.test_all(VolumeRendering; ambiguities=false)
+    Aqua.test_ambiguities(VolumeRendering)
+    CHL.@check()
+end

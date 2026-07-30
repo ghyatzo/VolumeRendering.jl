@@ -1,6 +1,14 @@
 [deps]
+Aqua = "4c88cf16-eb10-579e-8560-4a9242c79595"
 AxisKeys = "94b1ba4f-4ee9-5380-92f1-94cde586c3c5"
+CompatHelperLocal = "5224ae11-6099-4aaa-941d-3aab004bd678"
 GLFW = "f7f18e0c-5ee9-5ccd-a5bf-e8befd85ed98"
 ModernGL = "66fc600b-dfda-50eb-8b99-91cfa97b1301"
 StaticArrays = "90137ffa-7385-5640-81b9-e52037218182"
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+
+[compat]
+Aqua = "0.8.16"
+CompatHelperLocal = "0.1.29"
+GLFW = "3.4.6"
+Test = "1.10"
