@@ -64,7 +64,7 @@ function _handle_camera_input!(view::FieldView, hovered::Bool, w, h)
             k(key) = CImGui.IsKeyDown(key) ? 1.0 : 0.0
             fwd = k(CImGui.ImGuiKey_W) - k(CImGui.ImGuiKey_S)
             rgt = k(CImGui.ImGuiKey_D) - k(CImGui.ImGuiKey_A)
-            upd = k(CImGui.ImGuiKey_E) - k(CImGui.ImGuiKey_Q)
+            upd = k(CImGui.ImGuiKey_Space) - k(CImGui.ImGuiKey_C)
             speed = params.fly_speed * (unsafe_load(io.KeyShift) ? 5.0 : 1.0)   # Shift = sprint
             (fwd != 0 || rgt != 0 || upd != 0) && fly!(cam, fwd, rgt, upd, speed)
         end
