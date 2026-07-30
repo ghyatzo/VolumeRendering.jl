@@ -4,8 +4,9 @@
 
 VolumeFields turns a 3D scalar field into an interactive, ray-marched image on the GPU, and hands it to you as a single ImGui widget you can drop into your own application — the way you'd drop a plot into a window. Scalar fields are volume-rendered with a configurable transfer function; vector fields are shown as streamlines and glyphs. Slices, bounding boxes, spheres and axes layer on top as overlays.
 
-<!-- TODO: replace with a recorded interaction video -->
-> 📹 *Interaction demo — coming soon.*
+https://github.com/user-attachments/assets/0ff46ebc-9a73-4ef7-b758-9f330e348ea5
+
+https://github.com/user-attachments/assets/fb981f3e-8402-4861-85fb-c061f06532b5
 
 # Quick start
 
