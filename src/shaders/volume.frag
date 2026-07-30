@@ -23,6 +23,18 @@ uniform sampler2D geomDepthTex;   // full-res geometry depth; clip the march at 
 uniform ivec2 geomSize;      // full-res geometry-pass size (gw,gh)
 uniform ivec2 volSize;       // this pass's low-res size (vw,vh)
 
+// pcg2d hash — Jarzynski & Olano, "Hash Functions for GPU Rendering" (JCGT 2020).
+// High-quality, structure-free per-pixel white noise; no sin/fract, so no diagonal/moiré
+// correlation between neighbours and GPU-deterministic (pure integer math).
+float hash12(uvec2 p) {
+    uvec2 v = p * 1664525u + 1013904223u;
+    v.x += v.y * 1664525u;  v.y += v.x * 1664525u;
+    v ^= v >> 16u;
+    v.x += v.y * 1664525u;  v.y += v.x * 1664525u;
+    v ^= v >> 16u;
+    return float(v.x) * (1.0 / 4294967296.0);   // → [0, 1)
+}
+
 void main() {
     vec3 ro, rd;
     cameraRay(vuv, ro, rd);
@@ -59,7 +71,7 @@ void main() {
         // rays never take vanishing steps.
         // Deterministic per-pixel jitter offsets the first sample by a sub-step so the sampling lattice
         // shows up as (stable, frame-invariant) fine noise instead of coherent banding / ringing.
-        float jitter = fract(sin(dot(gl_FragCoord.xy, vec2(12.9898, 78.233))) * 43758.5453);
+        float jitter = hash12(uvec2(gl_FragCoord.xy));
         float t = tn + jitter * (stepScale * stepSize(ro + rd * tn));
         for (int s = 0; s < steps && t < tfar; s++) {
             vec3 pos = ro + rd * t;
