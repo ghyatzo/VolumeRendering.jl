@@ -9,6 +9,8 @@ include("vector_field.jl")
 include("geometry_renderer.jl")
 include("volume_renderer.jl")   # defines the Overlay protocol + GeomContext, used by overlays.jl
 include("overlays.jl")
+include("imgui.jl")             # CImGui interop: ShowVolume widget + camera input
+include("controls.jl")          # ShowControls panel (CImGui + ImPlot)
 
 # ── public API ──
 export FieldView, render!, RenderParams, TransferFunction, Camera
@@ -27,10 +29,7 @@ export StreamlinesOverlay, GlyphsOverlay, default_overlays
 # vector fields:
 export VectorField, compute_streamlines
 
-# The interactive view widget. The ONLY UI the package ships; its method lives in the CImGui
-# extension (ext/CImGuiExt.jl), so the core carries no CImGui dependency. A host that
-# `using`s CImGui gets `ShowField(view; size)` automatically.
-function ShowField end
-export ShowField
+# The UI (`VolumeFields.ShowVolume` widget + `VolumeFields.ShowControls` panel) lives in
+# imgui.jl / controls.jl, included above. Both are intentionally NOT exported — call them qualified.
 
 end # module VolumeFields

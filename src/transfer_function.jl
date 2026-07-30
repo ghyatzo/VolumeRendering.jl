@@ -6,7 +6,7 @@ using ColorSchemes, StaticArrays
 
 # A small default list a host UI can offer. NOT a restriction: `colormap` accepts any
 # ColorSchemes symbol (bake! looks it up in ColorSchemes.colorschemes directly).
-const TF_COLORMAPS = (:viridis, :inferno, :turbo, :afmhot)
+const TF_COLORMAPS = (:viridis, :inferno, :magma, :plasma, :turbo, :cividis, :afmhot, :grays)
 
 mutable struct TransferFunction
     colormap::Symbol
