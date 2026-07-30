@@ -70,7 +70,10 @@ end
 region(A::KeyedArray{<:Real,3}) =
     (k = axiskeys(A); BoxRegion(SVector(Float64.(first.(k))...), SVector(Float64.(last.(k))...)))
 
-value_range(A::KeyedArray{<:Real,3}) = Float64.(extrema(A))
+# much faster than Base extrema — its tuple-accumulator mapreduce doesn't vectorize (julia#31442)
+_extrema(A) = (minimum(A), maximum(A))
+
+value_range(A::KeyedArray{<:Real,3}) = Float64.(_extrema(A))
 
 # Identity fingerprint: the field is swapped (a new object set on the view), not mutated in place, to
 # change what is displayed — so `objectid` distinguishes distinct fields without hashing the data.
