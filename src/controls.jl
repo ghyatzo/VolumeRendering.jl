@@ -83,7 +83,7 @@ function ShowControls(view::FieldView)
     end
     CImGui.SetNextItemWidth(hw)
     let v = Ref(Cfloat(params.step_scale))
-        (@c CImGui.SliderFloat("##stepk", &v[], 0.005f0, 1.0f0, "step scale: %.3f",
+        (@c CImGui.SliderFloat("##stepk", &v[], 1.0f-3, 1.0f3, "step scale: %.4g",
                                CImGui.ImGuiSliderFlags_Logarithmic)) && (params.step_scale = v[])
     end
     CImGui.SameLine(); CImGui.SetNextItemWidth(hw)
