@@ -12,11 +12,8 @@ VolumeFields turns a 3D scalar field into an interactive, ray-marched image on t
 ```julia
 using VolumeFields, AxisKeys
 
-# here we synthesize a sample blob, but in practice `A` is your own data —
-# any 3D `KeyedArray` whose axis keys give the world coordinates
-xs = ys = zs = -1:0.02:1
-A = KeyedArray([exp(-(x^2 + y^2 + z^2) / 0.1) for x in xs, y in ys, z in zs];
-               x = xs, y = ys, z = zs)
+# your data: any 3D `KeyedArray` whose axis keys give the world coordinates
+A = KeyedArray(...; x = xs, y = ys, z = zs)
 
 view = FieldView(A)
 
