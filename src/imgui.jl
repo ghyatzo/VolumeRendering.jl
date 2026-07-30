@@ -1,18 +1,14 @@
-# CImGui interop — the sole raw-CImGui layer for a FieldView. `ShowVolume(view; size)` draws the
-# view as an interactive image inside the host's current CImGui window/layout and turns
-# mouse/keyboard into camera moves. Right-clicking the image WITHOUT dragging toggles a floating
-# controls window (the panel itself is `ShowControls`, in controls.jl). `GL` is the module-scope
-# ModernGL alias from gl.jl; `orbit!`/`pan!`/… are the camera ops from camera.jl.
+# CImGui interop for a FieldView: `ShowVolume` draws it as an interactive image and turns
+# mouse/keyboard into camera moves; right-click (no drag) toggles a floating `ShowControls` window.
 
 using CImGui
 using CImGui: ImVec2
-using CImGui.CSyntax   # @c — pass Ref pointers to Begin/… wrappers
+using CImGui.CSyntax   # @c
 
 const ROT_SPEED  = 0.007   # rad per pixel of drag
 const ZOOM_SPEED = 0.12    # per mouse-wheel notch
 
-# Per-view interaction state (a drag continues even if the cursor leaves the image). Kept in a
-# WeakKeyDict so it neither pollutes the core FieldView type nor leaks when a view is dropped.
+# Per-view interaction state, in a WeakKeyDict so it stays off the FieldView type and GCs with it.
 mutable struct _Drag
     rotating::Bool
     panning::Bool
@@ -23,11 +19,8 @@ end
 const _DRAG = Base.WeakKeyDict{FieldView,_Drag}()
 _drag(view::FieldView) = get!(() -> _Drag(false, false, false, false, false), _DRAG, view)
 
-# Draw `view` as an interactive image at `size` (ImGui item-size convention via CalcItemSize:
-# negative = fill the content region, positive = explicit px, 0 = default). Renders at device
-# resolution (logical size × DisplayFramebufferScale), shows the G-buffer texture V-flipped, and wires
-# camera input scoped to this view's id (so multiple views — even in one window — don't collide).
-# `controls = true` shows the right-click controls window (see `ShowControls`).
+# Draw `view` as an interactive image of `size` (ImGui item-size convention). Renders at device
+# resolution, shows the G-buffer V-flipped, and scopes camera input per-view (multi-view safe).
 function ShowVolume(view::FieldView; size::ImVec2 = ImVec2(-CImGui.FLT_MIN, -CImGui.FLT_MIN),
                     controls::Bool = true)
     sz = CImGui.CalcItemSize(size, 256.0, 256.0)                 # 256² default if a component is 0
@@ -83,10 +76,8 @@ function _handle_camera_input!(view::FieldView, hovered::Bool, w, h)
     end
 end
 
-# The floating per-view controls window: wraps `ShowControls` (controls.jl) in its own window with a
-# close (×) button wired back to this view's `controls_open` flag. A distinct `##id` per view lets
-# several views each have their own panel. Interleaving this Begin/End inside the host's volume
-# window is allowed by Dear ImGui.
+# Floating per-view controls window (distinct ##id per view), with a × close wired to controls_open.
+# Interleaving this Begin/End inside the host's window is allowed by Dear ImGui.
 function _controls_window!(view::FieldView)
     drag = _drag(view)
     p_open = Ref(true)

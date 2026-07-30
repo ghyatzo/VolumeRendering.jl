@@ -21,9 +21,8 @@ function compile_shader(kind, src::AbstractString)
     s
 end
 
-# Splice `//#include "name.glsl"` lines with either an in-memory `includes[name]` snippet or, when
-# absent, `shaders/name.glsl` from disk (one level — shared snippets don't nest), so fragment/vertex
-# shaders share `cameraRay`/`sampleField`/`tf`/`writeDepth` verbatim. The `#version` line stays in the
+# Splice `//#include "name.glsl"` lines from the in-memory `includes[name]` snippet, else
+# `shaders/name.glsl` on disk. One level only (snippets don't nest). `#version` stays in the
 # including file; snippets carry only declarations + functions.
 resolve_includes(src::AbstractString; includes::Dict{String,String} = Dict{String,String}()) = replace(src,
     r"(?m)^[ \t]*//#include[ \t]+\"([^\"]+)\"[ \t]*$" =>
@@ -31,8 +30,7 @@ resolve_includes(src::AbstractString; includes::Dict{String,String} = Dict{Strin
               haskey(includes, name) ? includes[name] : read(joinpath(SHADER_DIR, name), String)))
 _shader_src(file) = resolve_includes(read(joinpath(SHADER_DIR, file), String))
 
-# Compile + link a program from vertex/fragment shader source strings, splicing any `//#include`s
-# through `resolve_includes` with the given in-memory `includes` map (falling back to disk).
+# Compile + link a program from vertex/fragment source strings, resolving `//#include`s.
 function link_program_src(vert_src::AbstractString, frag_src::AbstractString; includes::Dict{String,String} = Dict{String,String}())
     vs = compile_shader(GL.GL_VERTEX_SHADER,   resolve_includes(vert_src; includes))
     fs = compile_shader(GL.GL_FRAGMENT_SHADER, resolve_includes(frag_src; includes))
@@ -52,9 +50,8 @@ end
 link_program(vert_file::AbstractString, frag_file::AbstractString) =
     link_program_src(read(joinpath(SHADER_DIR, vert_file), String), read(joinpath(SHADER_DIR, frag_file), String))
 
-# `GL_LINEAR` (default) so the shader reads the field with one hardware-filtered `texture()` fetch (the
-# 8-tap manual blend is gone). Wrap modes are per-axis: `wrap[1]→S, wrap[2]→T, wrap[3]→R`. Default is
-# CLAMP_TO_EDGE on all three (correct for a generic Cartesian grid). The (w,h,d) axis order maps S,T,R.
+# `GL_LINEAR` default → one hardware-filtered `texture()` fetch. Wrap is per-axis: `wrap[1]→S,
+# wrap[2]→T, wrap[3]→R`, default CLAMP_TO_EDGE (correct for a generic Cartesian grid). (w,h,d)→S,T,R.
 function tex3d_r32f(data::AbstractArray{<:Real,3};
                     wrap = (GL.GL_CLAMP_TO_EDGE, GL.GL_CLAMP_TO_EDGE, GL.GL_CLAMP_TO_EDGE),
                     filter = GL.GL_LINEAR)
@@ -140,7 +137,7 @@ function Base.resize!(fb::Framebuffer, w, h)
     fb
 end
 
-# Uniform setters (look up by name each call — simplest; the shader has few uniforms).
+# Uniform setters (look up by name each call; few uniforms per shader).
 uni_i(p, name, v)     = GL.glUniform1i(GL.glGetUniformLocation(p, name), Int32(v))
 uni_f(p, name, v)     = GL.glUniform1f(GL.glGetUniformLocation(p, name), Float32(v))
 uni_2f(p, name, x, y) = GL.glUniform2f(GL.glGetUniformLocation(p, name), Float32(x), Float32(y))

@@ -25,8 +25,7 @@ abstract type FieldSource end
 # Per-axis dispatch — the extension seam.
 # ================================================================================================
 # Returns a GLSL EXPRESSION mapping a world coordinate on this axis (`coordvar`) to a fractional
-# 0-based cell index. Users overload `axis_index_glsl` for their own axis-key types — that is the
-# whole point; keep it a one-method generic function.
+# 0-based cell index. Users overload `axis_index_glsl` for their own axis-key types (the extension seam).
 axis_index_glsl(key::AbstractRange, coordvar::AbstractString)::String =
     "((" * coordvar * ") - " * repr(Float64(first(key))) * ") * " * repr(inv(Float64(step(key))))
 

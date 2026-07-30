@@ -106,12 +106,10 @@ Overlays draw into the same scene as the volume and clip against it. Pass them w
 using StaticArrays
 
 view = FieldView(A; overlays = [
-    SliceOverlay(:z; pos = 0.0),      # a TF-colored plane through the field
+    SliceOverlay(:z; pos = 0.0),      # a planar slice through the field
     BoxOutlineOverlay(),              # edges of the region
     AxesOverlay(),                    # x/y/z axes through the center
-    SphereOverlay(radius = 0.4),      # an analytic sphere impostor
-    StreamlinesOverlay(vf),           # field lines of a VectorField
-    GlyphsOverlay(vf; every = 8),     # arrow glyphs
+    SphereOverlay(radius = 0.4),      # sphere geometry
 ])
 ```
 

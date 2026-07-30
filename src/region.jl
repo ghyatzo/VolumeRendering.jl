@@ -20,8 +20,8 @@ struct BoxRegion <: Region
     lo::SVector{3,Float64}
     hi::SVector{3,Float64}
 end
-# The default constructor already converts each arg to SVector{3,Float64} via `new`, so
-# `BoxRegion((-10,-10,-10), (10,10,10))` and SVector args both work — no extra constructor needed.
+# The default constructor converts each arg to SVector{3,Float64} via `new`, so tuple and SVector
+# args both work — no extra constructor needed.
 
 # Slab test, ported from volume.frag (lines 30-33) with boxLo/boxHi replacing ±extent.
 region_glsl(::BoxRegion) = """

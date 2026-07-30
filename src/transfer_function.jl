@@ -1,12 +1,10 @@
-# Transfer-function model: a colormap (color vs normalized value) plus an editable
-# piecewise-linear opacity curve. Baked to a 256×1 RGBA texture the shader samples.
-# The interactive editor widget is not part of this package (this file stays UI-free).
+# Transfer-function model: a colormap plus an editable piecewise-linear opacity curve, baked to a
+# 256×1 RGBA texture the shader samples. UI-free (the widgets live in controls.jl).
 
 using ColorSchemes, StaticArrays
 
-# A small default list a host UI can offer. NOT a restriction: `colormap` accepts any
-# ColorSchemes symbol (bake! looks it up in ColorSchemes.colorschemes directly).
-const TF_COLORMAPS = (:viridis, :inferno, :magma, :plasma, :turbo, :cividis, :afmhot, :grays)
+# Default list for a UI; not a restriction — `colormap` accepts any ColorSchemes symbol.
+const TF_COLORMAPS = (:viridis, :inferno, :turbo, :afmhot, :grays)
 
 mutable struct TransferFunction
     colormap::Symbol

@@ -1,8 +1,6 @@
 # A Cartesian vector field over a Region, plus evenly-spaced 3D streamlines / arrow glyphs of it via
 # UniformStreamlines. Pure CPU (no GL) — the GL upload lives in geometry_renderer.jl; here we produce
-# flat interleaved (x,y,z, r,g,b) vertex arrays ready to draw as GL_LINES. Field lines are the
-# integral curves of `vf.f` (the closure is already Cartesian — any pushforward is a downstream
-# concern and does not belong here).
+# flat interleaved (x,y,z, r,g,b) vertex arrays ready to draw as GL_LINES.
 
 using StaticArrays, LinearAlgebra, Statistics
 using ColorSchemes
@@ -45,7 +43,7 @@ function streamline_vertices(data, colormap::Symbol, lo, hi)
         append!(out, (Float32(p[1]), Float32(p[2]), Float32(p[3]), _color(scheme, v, lo, hi)...)))
     for j in 1:size(P, 2)-1
         (isnan(P[1, j]) || isnan(P[1, j+1])) && continue
-        push_vert!(j); push_vert!(j+1)   # one GL_LINES segment
+        push_vert!(j); push_vert!(j+1)
     end
     out
 end
