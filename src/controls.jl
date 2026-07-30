@@ -6,6 +6,7 @@ using CImGui, ImPlot
 using CImGui: ImVec2, ImVec4
 using CImGui.CSyntax          # @c — pass Ref pointers to the widget wrappers
 import ColorSchemes
+import ImPlotExtra
 
 const _MODES = (("DVR", "direct volume rendering (emission-absorption)"),
                 ("MIP", "maximum intensity projection"),
@@ -63,6 +64,21 @@ function _colormap_buttons!(tf::TransferFunction)
     end
 end
 
+# Interactive value→colour scale for the TF window: scroll zooms, drag pans, mutating tf.lo/tf.hi
+# (live shader uniforms, so no re-bake). Mirrors the shader normalization — linear → identity over
+# (lo,hi); log → log10 over (10^lo, 10^hi) — so the bar and the render can't disagree.
+function _tf_colorbar!(tf::TransferFunction, width::Real)
+    scale = tf.logscale ? log10 : identity
+    cr = tf.logscale ? (exp10(tf.lo), exp10(tf.hi)) : (tf.lo, tf.hi)
+    ref = Ref(cr)
+    ImPlotExtra.colorbar!("##tfwin", tf.colormap, ref, scale, width; orientation = :horizontal)
+    if ref[] != cr                       # write back only on interaction (no log/exp round-trip drift)
+        nlo, nhi = ref[]
+        tf.lo, tf.hi = tf.logscale ? (log10(nlo), log10(nhi)) : (nlo, nhi)
+    end
+    nothing
+end
+
 # Emit the controls into the current ImGui window (no Begin/End of its own).
 function ShowControls(view::FieldView)
     _ensure_implot!()
@@ -103,16 +119,7 @@ function ShowControls(view::FieldView)
         (@c CImGui.Checkbox("log scale", &v[])) &&
             (tf.logscale = v[]; default_window!(tf, (vmin, vmax)))
     end
-    lm = log10(max(vmax, 1e-300))
-    lo_min, lo_max = tf.logscale ? (Cfloat(lm - 8), Cfloat(lm + 1)) : (Cfloat(vmin), Cfloat(vmax))
-    CImGui.SetNextItemWidth(hw)
-    let v = Ref(Cfloat(tf.lo))
-        (@c CImGui.SliderFloat("##lo", &v[], lo_min, lo_max, "lo: %.3g")) && (tf.lo = v[])
-    end
-    CImGui.SameLine(); CImGui.SetNextItemWidth(hw)
-    let v = Ref(Cfloat(tf.hi))
-        (@c CImGui.SliderFloat("##hi", &v[], lo_min, lo_max, "hi: %.3g")) && (tf.hi = v[])
-    end
+    _tf_colorbar!(tf, CImGui.GetContentRegionAvail().x)
 
     CImGui.SeparatorText("View")
     let sel = _radio_row("proj", (("perspective", nothing), ("ortho", nothing)),
