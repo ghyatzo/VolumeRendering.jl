@@ -4,7 +4,13 @@
 
 VolumeRendering turns a 3D scalar field into an interactive, ray-marched image on the GPU, and hands it to you as a single ImGui widget you can drop into your own application — the way you'd drop a plot into a window. Scalar fields are volume-rendered with a configurable transfer function; vector fields are shown as streamlines and glyphs. Slices, bounding boxes, spheres and axes layer on top as overlays.
 
+The recommended way to use `VolumeRendering.jl` is as a Dear ImGui widget, but it can be integrated into other environments that have OpenGL, can render a texture, and pass mouse events.
+
+Simple example, see [demo.jl](examples/demo.jl):
+
 https://github.com/user-attachments/assets/0ff46ebc-9a73-4ef7-b758-9f330e348ea5
+
+In [PlasmaScope.jl](https://github.com/aplavin/PlasmaScope.jl) that uses `VolumeRendering.jl` to display GRHMD snapshots:
 
 https://github.com/user-attachments/assets/fb981f3e-8402-4861-85fb-c061f06532b5
 
