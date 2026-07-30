@@ -1,0 +1,113 @@
+# NOTE: this suite uses a single shared GLFW/OpenGL context for all render checks (rather than the
+# usual per-@testitem isolation) — every test needs a live GL context, and one shared hidden context
+# is both faster and avoids multiple concurrent contexts. All GL work happens inside `withctx`.
+
+using Test
+using VolumeFields, AxisKeys, StaticArrays
+import GLFW, ModernGL as GL
+
+# ── headless GL context + pixel readback helpers ──
+function withctx(f; w = 64, h = 64)
+    GLFW.Init()
+    GLFW.WindowHint(GLFW.VISIBLE, false)
+    GLFW.WindowHint(GLFW.CONTEXT_VERSION_MAJOR, 4); GLFW.WindowHint(GLFW.CONTEXT_VERSION_MINOR, 1)
+    GLFW.WindowHint(GLFW.OPENGL_PROFILE, GLFW.OPENGL_CORE_PROFILE)
+    GLFW.WindowHint(GLFW.OPENGL_FORWARD_COMPAT, true)
+    win = GLFW.CreateWindow(w, h, "VolumeFields tests"); GLFW.MakeContextCurrent(win)
+    try f() finally GLFW.DestroyWindow(win); GLFW.Terminate() end
+end
+function renderbuf(view, w)
+    tex = render!(view, w, w)
+    GL.glBindFramebuffer(GL.GL_FRAMEBUFFER, view.vr.geom_fb.fbo)
+    buf = Array{UInt8}(undef, 4, w, w)
+    GL.glReadPixels(0, 0, w, w, GL.GL_RGBA, GL.GL_UNSIGNED_BYTE, buf); GL.glFinish()
+    (tex, buf)
+end
+litfrac(b) = count(>(4), @view b[1:3, :, :]) / (3 * size(b, 2) * size(b, 3))
+
+const W = 256
+gaussian(xs, ys, zs; c = (0.0, 0.0, 0.0), s = 0.2) =
+    Float64[exp(-((x-c[1])^2 + (y-c[2])^2 + (z-c[3])^2) / s) for x in xs, y in ys, z in zs]
+
+# a custom (non-AbstractRange) uniform axis, to exercise the axis_index_glsl extension seam
+struct UniformAxis <: AbstractVector{Float64}; a::Float64; d::Float64; n::Int; end
+Base.size(k::UniformAxis) = (k.n,)
+Base.getindex(k::UniformAxis, i::Int) = k.a + k.d * (i - 1)
+VolumeFields.axis_index_glsl(k::UniformAxis, c) = "((" * c * ") - " * repr(k.a) * ") * " * repr(inv(k.d))
+
+@testset "VolumeFields" begin
+    withctx() do
+        xs = ys = zs = -1.0:0.05:1.0
+
+        @testset "KeyedArray volume renders" begin
+            v = FieldView(KeyedArray(gaussian(xs, ys, zs); x = xs, y = ys, z = zs))
+            _, b = renderbuf(v, W)
+            @test GL.glGetError() == 0
+            @test litfrac(b) > 0.02
+        end
+
+        @testset "coordinate mapping (x>0 field → image right)" begin
+            step = Float64[x > 0 ? 1.0 : 0.0 for x in xs, y in ys, z in zs]
+            v = FieldView(KeyedArray(step; x = xs, y = ys, z = zs))
+            v.params.mode = 1                                   # MIP
+            v.camera.projection = :ortho
+            v.camera.eye = SVector(0.0, 0.0, 3.0); v.camera.lookat = SVector(0.0, 0.0, 0.0)
+            v.camera.up = SVector(0.0, 1.0, 0.0); v.camera.ortho_half = 1.2
+            _, b = renderbuf(v, W)
+            lum = sum(Int.(b[1:3, :, :]); dims = 1)[1, :, :]
+            left = sum(@view lum[1:W÷2, :]); right = sum(@view lum[W÷2+1:W, :])
+            @test right > 3 * max(left, 1)                      # +x maps to camera-right
+        end
+
+        @testset "GLSLField (analytic) + SphereRegion" begin
+            f = GLSLField("""
+                float sampleField(vec3 p){ return exp(-dot(p,p)*0.7); }
+                float stepSize(vec3 p){ return 0.05; }""";
+                region = SphereRegion(radius = 3.0), value_range = (0.0, 1.0))
+            _, b = renderbuf(FieldView(f), W)
+            @test GL.glGetError() == 0
+            @test litfrac(b) > 0.02
+        end
+
+        @testset "custom axis type == equivalent range axis (pixel-identical)" begin
+            blob = gaussian(xs, ys, zs)
+            _, bref = renderbuf(FieldView(KeyedArray(blob; x = xs, y = ys, z = zs)), W)
+            ax = UniformAxis(-1.0, 0.05, length(xs))
+            _, bcus = renderbuf(FieldView(KeyedArray(blob; x = ax, y = ys, z = zs)), W)
+            @test bref == bcus
+        end
+
+        @testset "all overlays render without GL error" begin
+            A = KeyedArray(gaussian(xs, ys, zs); x = xs, y = ys, z = zs)
+            vf = VectorField(p -> SVector(-p[2], p[1], 0.2); region = BoxRegion((-1.,-1.,-1.), (1.,1.,1.)))
+            ovs = Overlay[SliceOverlay(:z), BoxOutlineOverlay(), SphereOverlay(radius = 0.4),
+                          AxesOverlay(), StreamlinesOverlay(vf), GlyphsOverlay(vf; every = 8)]
+            _, b = renderbuf(FieldView(A; overlays = ovs), W)
+            @test GL.glGetError() == 0
+            @test litfrac(b) > 0.05
+        end
+
+        @testset "field switch re-uploads (same-shape, different data)" begin
+            # A1/A2 have identical shape+axes → identical field_glsl → the volume program is NOT
+            # rebuilt on switch; the texture MUST still be re-uploaded so the image reflects A2.
+            A1 = KeyedArray(gaussian(xs, ys, zs; c = (-0.5, 0.0, 0.0), s = 0.1); x = xs, y = ys, z = zs)
+            A2 = KeyedArray(gaussian(xs, ys, zs; c = ( 0.5, 0.0, 0.0), s = 0.1); x = xs, y = ys, z = zs)
+            @test field_glsl(A1) == field_glsl(A2)     # same GLSL: only the data differs
+            v = FieldView(A1); (_, b1) = renderbuf(v, W)
+            v.field = A2;      (_, b2) = renderbuf(v, W)
+            @test b1 != b2                             # image reflects the new data (no stale texture)
+        end
+
+        @testset "multi-view isolation (two views, one context)" begin
+            A  = KeyedArray(gaussian(xs, ys, zs); x = xs, y = ys, z = zs)
+            A2 = KeyedArray(gaussian(xs, ys, zs; c = (0.5, 0.0, 0.0), s = 0.1); x = xs, y = ys, z = zs)
+            va = FieldView(A); vb = FieldView(A2)
+            _, ba = renderbuf(va, W)
+            renderbuf(vb, W)                                    # render B in between
+            va.last_key[] = nothing                             # force A to re-render (same inputs)
+            _, ba2 = renderbuf(va, W)
+            @test ba == ba2                                     # B did not corrupt A
+            @test va.vr.geom_fb.tex != vb.vr.geom_fb.tex        # separate GL resources
+        end
+    end
+end
