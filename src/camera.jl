@@ -86,12 +86,14 @@ reset!(cam::Camera, default::Camera) = (cam.eye = default.eye; cam.lookat = defa
 
 # View·projection matrix, constructed to match the fragment shader's ray generation exactly (so a
 # world point's projected depth is consistent between the ray-march and the line/point geometry
-# pass). near/far bracket the bounding sphere of the given `radius` around `cam.lookat`. Eye space:
-# +X right, +Y up, +Z = −forward (GL convention).
-function view_proj(cam::Camera, radius, aspect)
+# pass). near/far bracket the content's bounding sphere `(center, radius)` along the view axis —
+# anchored to the CONTENT, not `cam.lookat`, so geometry is never clipped away when the eye flies in
+# close while `lookat` aims far past it. Eye space: +X right, +Y up, +Z = −forward (GL convention).
+function view_proj(cam::Camera, center, radius, aspect)
     right, up, fwd = view_basis(cam); e = cam.eye; fs = fovscale(cam)
-    diag = radius; dist = norm(e - cam.lookat)
-    near = max(0.01 * radius, dist - 1.5diag); far = dist + 1.5diag
+    depth = dot(fwd, center - e)                         # content-center depth along the view axis
+    near = max(0.01 * radius, depth - radius)
+    far  = max(depth + radius, near + 0.01 * radius)     # keep a valid frustum if content is behind the eye
     V = @SMatrix [ right[1] right[2] right[3] -dot(right, e);
                    up[1]    up[2]    up[3]    -dot(up, e);
                   -fwd[1]  -fwd[2]  -fwd[3]    dot(fwd, e);

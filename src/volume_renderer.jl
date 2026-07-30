@@ -156,8 +156,8 @@ function render_frame!(view::FieldView, gw, gh, vw, vh)
     vr = view.vr
     resize!(vr.geom_fb, gw, gh); resize!(vr.vol_fb, vw, vh)
     aspect = gw / gh
-    _, radius = bounds(view.region)
-    vpm = view_proj(view.camera, radius, aspect)
+    center, radius = bounds(view.region)
+    vpm = view_proj(view.camera, center, radius, aspect)
     vp  = vec(Matrix{Float32}(vpm))
     ivp = vec(Matrix{Float32}(inv(vpm)))
     ctx = GeomContext(vp, gw, gh, view.camera, aspect, view.field, view.gpu, view.region, view.tf, view.params)

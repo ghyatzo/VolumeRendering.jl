@@ -12,6 +12,15 @@ void main() {
     float side  = (gl_VertexID & 1) == 0 ? -1.0 : 1.0;
     vec4 ca = viewProj * vec4(axisA, 1.0);
     vec4 cb = viewProj * vec4(axisB, 1.0);
+    // Near-plane clip BEFORE the screen-space divide: an endpoint behind the camera (w<0) would give a
+    // corrupted screen position AND depth (cur.z/cur.w), letting the occluded half paint over geometry.
+    // Move any behind-plane endpoint onto the near plane (z_ndc = -1, i.e. clip.z + clip.w = 0) so both
+    // quad endpoints have valid w>0. Segments fully behind the near plane are culled off-screen.
+    float da = ca.z + ca.w;                                // signed distance to near plane (>=0 = in front)
+    float db = cb.z + cb.w;
+    if (da < 0.0 && db < 0.0) { gl_Position = vec4(0.0, 0.0, 2.0, 1.0); return; }
+    if (da < 0.0)      { ca = mix(ca, cb, da / (da - db)); }
+    else if (db < 0.0) { cb = mix(cb, ca, db / (db - da)); }
     vec4 cur = endsel == 0 ? ca : cb;
     vec2 sa = ca.xy / ca.w, sb = cb.xy / cb.w;             // endpoints in NDC
     vec2 dir = normalize((sb - sa) * viewportPx);          // pixel-space line direction

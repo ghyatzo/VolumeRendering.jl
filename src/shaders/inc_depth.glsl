@@ -6,5 +6,9 @@ uniform mat4 viewProj;
 
 void writeDepth(vec3 worldPos) {
     vec4 clip = viewProj * vec4(worldPos, 1.0);
-    gl_FragDepth = clamp(0.5 * clip.z / clip.w + 0.5, 0.0, 1.0);
+    float ndcZ = clip.z / clip.w;
+    // Clip the impostor exactly like rasterized geometry: discard hits behind the eye or outside the
+    // near/far planes rather than clamping, so impostors and real geometry fail identically at the frustum.
+    if (clip.w <= 0.0 || ndcZ < -1.0 || ndcZ > 1.0) discard;
+    gl_FragDepth = 0.5 * ndcZ + 0.5;
 }
