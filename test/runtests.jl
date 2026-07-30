@@ -3,7 +3,7 @@
 # is both faster and avoids multiple concurrent contexts. All GL work happens inside `withctx`.
 
 using Test
-using VolumeFields, AxisKeys, StaticArrays
+using VolumeRendering, AxisKeys, StaticArrays
 import GLFW, ModernGL as GL
 
 # ── headless GL context + pixel readback helpers ──
@@ -13,7 +13,7 @@ function withctx(f; w = 64, h = 64)
     GLFW.WindowHint(GLFW.CONTEXT_VERSION_MAJOR, 4); GLFW.WindowHint(GLFW.CONTEXT_VERSION_MINOR, 1)
     GLFW.WindowHint(GLFW.OPENGL_PROFILE, GLFW.OPENGL_CORE_PROFILE)
     GLFW.WindowHint(GLFW.OPENGL_FORWARD_COMPAT, true)
-    win = GLFW.CreateWindow(w, h, "VolumeFields tests"); GLFW.MakeContextCurrent(win)
+    win = GLFW.CreateWindow(w, h, "VolumeRendering tests"); GLFW.MakeContextCurrent(win)
     try f() finally GLFW.DestroyWindow(win); GLFW.Terminate() end
 end
 function renderbuf(view, w)
@@ -33,9 +33,9 @@ gaussian(xs, ys, zs; c = (0.0, 0.0, 0.0), s = 0.2) =
 struct UniformAxis <: AbstractVector{Float64}; a::Float64; d::Float64; n::Int; end
 Base.size(k::UniformAxis) = (k.n,)
 Base.getindex(k::UniformAxis, i::Int) = k.a + k.d * (i - 1)
-VolumeFields.axis_index_glsl(k::UniformAxis, c) = "((" * c * ") - " * repr(k.a) * ") * " * repr(inv(k.d))
+VolumeRendering.axis_index_glsl(k::UniformAxis, c) = "((" * c * ") - " * repr(k.a) * ") * " * repr(inv(k.d))
 
-@testset "VolumeFields" begin
+@testset "VolumeRendering" begin
     withctx() do
         xs = ys = zs = -1.0:0.05:1.0
 

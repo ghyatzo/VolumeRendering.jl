@@ -1,4 +1,4 @@
-module VolumeFields
+module VolumeRendering
 
 include("gl.jl")
 include("camera.jl")
@@ -29,7 +29,7 @@ export StreamlinesOverlay, GlyphsOverlay, default_overlays
 # vector fields:
 export VectorField, compute_streamlines
 
-# The UI (`VolumeFields.ShowVolume` widget + `VolumeFields.ShowControls` panel) lives in
+# The UI (`VolumeRendering.ShowVolume` widget + `VolumeRendering.ShowControls` panel) lives in
 # imgui.jl / controls.jl, included above. Both are intentionally NOT exported — call them qualified.
 
-end # module VolumeFields
+end # module VolumeRendering

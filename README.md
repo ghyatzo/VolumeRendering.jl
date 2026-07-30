@@ -1,8 +1,8 @@
-# VolumeFields.jl
+# VolumeRendering.jl
 
 **An embeddable [Dear ImGui](https://github.com/JuliaImGui/CImGui.jl) widget for real-time GPU volume rendering of 3D fields, with composable overlays.**
 
-VolumeFields turns a 3D scalar field into an interactive, ray-marched image on the GPU, and hands it to you as a single ImGui widget you can drop into your own application — the way you'd drop a plot into a window. Scalar fields are volume-rendered with a configurable transfer function; vector fields are shown as streamlines and glyphs. Slices, bounding boxes, spheres and axes layer on top as overlays.
+VolumeRendering turns a 3D scalar field into an interactive, ray-marched image on the GPU, and hands it to you as a single ImGui widget you can drop into your own application — the way you'd drop a plot into a window. Scalar fields are volume-rendered with a configurable transfer function; vector fields are shown as streamlines and glyphs. Slices, bounding boxes, spheres and axes layer on top as overlays.
 
 https://github.com/user-attachments/assets/0ff46ebc-9a73-4ef7-b758-9f330e348ea5
 
@@ -11,7 +11,7 @@ https://github.com/user-attachments/assets/fb981f3e-8402-4861-85fb-c061f06532b5
 # Quick start
 
 ```julia
-using VolumeFields, AxisKeys
+using VolumeRendering, AxisKeys
 
 # your data: any 3D `KeyedArray` whose axis keys give the world coordinates
 A = KeyedArray(...; x = xs, y = ys, z = zs)
@@ -48,7 +48,7 @@ A = KeyedArray([exp(-(x^2 + y^2 + z^2) / 0.1) for x in xs, y in ys, z in zs];
 view = FieldView(A)
 ```
 
-For a non-uniform axis, define one method — `VolumeFields.axis_index_glsl(k::MyAxis, coord)` returning the GLSL expression that maps a world coordinate to a fractional cell index — and your axis type works inside a `KeyedArray` like any range.
+For a non-uniform axis, define one method — `VolumeRendering.axis_index_glsl(k::MyAxis, coord)` returning the GLSL expression that maps a world coordinate to a fractional cell index — and your axis type works inside a `KeyedArray` like any range.
 
 ## Analytic
 
