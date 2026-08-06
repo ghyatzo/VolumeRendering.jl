@@ -174,3 +174,178 @@ end
 upload_field(f::GLSLField) = GLSLFieldGPU(f.bind)
 bind_field!(g::GLSLFieldGPU, prog) = g.bind(prog)
 free_field!(::GLSLFieldGPU) = nothing
+
+# ================================================================================================
+# Tiled Cartesian source — render grids whose dimensions exceed the GPU's GL_MAX_3D_TEXTURE_SIZE at
+# full resolution, by splitting the volume into a small grid of GL_TEXTURE_3D bricks.
+#
+# A plain KeyedArray{<:Real,3} is uploaded as ONE 3D texture (`tex3d_r32f`). OpenGL caps every
+# dimension of a 3D texture at GL_MAX_3D_TEXTURE_SIZE (commonly 2048); any dimension above that
+# leaves the texture *incomplete*, so every sample reads 0 and the volume renders black. Tiling
+# splits each axis `d` into `k[d]` chunks so every brick dimension ≤ maxdim.
+#
+# THIS STEP defines only the pure, GPU-free tiling geometry: the type, how each brick's data is
+# extracted from the source (with its shared boundary texel), and the index mapping the shader will
+# mirror. The GL path (`field_glsl` / `upload_field` / `bind_field!`) arrives in later steps.
+#
+#   k[d] = tiles along axis d (1 = the axis is NOT tiled; it already fits)
+#   L[d] = chunk = non-overlapping source indices owned by each brick
+#   D[d] = per-brick texels along d = L[d] + 1 when tiled, else n[d]
+#          (the +1 is a shared boundary texel so GL_LINEAR filtering blends seamlessly across bricks)
+# ================================================================================================
+struct TiledField <: FieldSource
+    field
+    k::NTuple{3,Int}   # tiles per axis
+    L::NTuple{3,Int}   # chunk stride per axis
+    D::NTuple{3,Int}   # per-brick texels per axis
+end
+
+function TiledField(field::KeyedArray{<:Real,3}; maxdim::Integer = 2048)
+    n  = size(field)
+    k  = ntuple(d -> n[d] > maxdim ? cld(n[d], maxdim) : 1, 3)
+    L  = ntuple(d -> cld(n[d], k[d]), 3)
+    D  = ntuple(d -> k[d] == 1 ? n[d] : L[d] + 1, 3)
+    TiledField(field, k, L, D)
+end
+
+total_bricks(t::TiledField) = prod(t.k)
+_axis_len(t::TiledField, d) = size(t.field, d)
+
+# Map one axis' local brick texel `loc` (0..D[d]-1) to its 1-based global source index.
+# Brick `b` (0..k[d]-1) owns the L[d] chunk starting at source index b*L[d] (0-based); texel loc == L[d]
+# is the shared boundary: it is the first interior texel of the NEXT brick (so both bricks carry the
+# same value there → seamless interpolation). The last brick clamps trailing texels to the final source
+# index; those are never sampled by a valid field point (the BoxRegion bounds the march).
+function _brick_axis_index(t::TiledField, d::Int, b::Int)
+    nd = _axis_len(t, d)
+    Dd = t.D[d]
+    [clamp(b * t.L[d] + loc, 0, nd - 1) + 1 for loc in 0:Dd-1]
+end
+
+# Materialize the full D-sized brick `b` (0-based, matching the shader) as a plain Array{Float32,3}.
+function brick_data(t::TiledField, b::NTuple{3,Int})
+    A = parent(t.field)
+    src = ntuple(d -> _brick_axis_index(t, d, b[d]), 3)
+    B = Array{eltype(A)}(undef, t.D)
+    for I in CartesianIndices(B)
+        B[I] = A[ntuple(d -> src[d][I[d]], 3)...]
+    end
+    B
+end
+
+# Forward index map (the shader mirrors this exactly): a continuous source index `g` (0-based, e.g.
+# `(coord - first) / step`) → `(brick b, local float l)`. `b` is clamped to [0, k-1], `l` to [0, D-1].
+function _map_axis(t::TiledField, d::Int, g::Real)
+    kd, Ld, Dd = t.k[d], t.L[d], t.D[d]
+    b = clamp(floor(Int, g / Ld), 0, kd - 1)
+    l = clamp(g - b * Ld, 0.0, Dd - 1.0)
+    (b, l)
+end
+
+# ================================================================================================
+# FieldSource interface for TiledField. Spatial extent and value range come from the inner grid
+# (unchanged → the world BoxRegion, camera framing and transfer-function window are identical to the
+# plain field). Only the GLSL/upload/bind parts differ (later steps).
+# ================================================================================================
+uses_transfer_function(t::TiledField) = uses_transfer_function(t.field)
+
+region(t::TiledField) = region(t.field)
+
+value_range(t::TiledField) = value_range(t.field)
+
+# `objectid` alone already distinguishes fields (the renderer swaps whole field objects, never mutates
+# in place); we add the tiling geometry so a single inner grid re-tiled differently gets a new key.
+fingerprint(t::TiledField) = (:tiled, objectid(t.field), t.k, t.L, t.D)
+
+# ================================================================================================
+# GLSL generation for a tiled field.
+#
+# Contract for brick ordering (shared with upload/bind in the next step): bricks are numbered by a
+# flat index `flat = b1 * (k2*k3) + b2 * k3 + b3`, in lexicographic (b1,b2,b3) order. Samplers are
+# named `fieldTex_<flat>`. `_brick_coords` recovers (b1,b2,b3) from `flat`.
+# ================================================================================================
+function _brick_coords(t::TiledField, i::Int)
+    b1 = div(i, t.k[2] * t.k[3]); r = i - b1 * (t.k[2] * t.k[3])
+    b2 = div(r, t.k[3]);          b3 = r - b2 * t.k[3]
+    (b1, b2, b3)
+end
+
+field_glsl(t::TiledField) = begin
+    A  = t.field
+    k  = axiskeys(A)
+    coord = ("p.x", "p.y", "p.z")
+    gsrc  = ntuple(d -> axis_index_glsl(k[d], coord[d]), 3)   # continuous source index (== (coord-first)/step)
+    mincell = repr(Float64(minimum(_axis_min_cell(kk) for kk in k)))
+    nB  = total_bricks(t)
+    k2, k3 = t.k[2], t.k[3]
+
+    ax(d) = begin
+        Ld, Dd, kd = t.L[d], t.D[d], t.k[d]
+        """
+        float g$d = $((gsrc[d]));
+        int   b$d = clamp(int(floor(g$d / float($Ld))), 0, $kd-1);
+        float l$d = clamp(g$d - float(b$d) * float($Ld), 0.0, float($Dd-1.0));
+        float u$d = (((interp == 0) ? floor(l$d) : l$d) + 0.5) / float($Dd);
+        """
+    end
+
+    samplers = join(("uniform sampler3D fieldTex_$i;" for i in 0:nB-1), "\n")
+
+    branches = IOBuffer()
+    for i in 0:nB-1
+        kw = i == 0 ? "if (bid == $i)" : "else if (bid == $i)"
+        print(branches, "\t", kw, " return texture(fieldTex_$i, vec3(u1,u2,u3)).r;\n")
+    end
+
+    """
+    $samplers
+    uniform int interp;
+    float sampleField(vec3 p){
+    $(ax(1))
+    $(ax(2))
+    $(ax(3))
+        int bid = b1 * ($(k2) * $k3) + b2 * $k3 + b3;
+    $(String(take!(branches)))
+        return 0.0;
+    }
+    float stepSize(vec3 p){ return $mincell; }
+    """
+end
+
+
+struct TiledFieldGPU
+    tex::Vector{UInt32}   # one 3D texture id per brick, flat order (matches `fieldTex_<flat>`)
+end
+
+upload_field(t::TiledField) =
+    TiledFieldGPU([tex3d_r32f(brick_data(t, _brick_coords(t, i))) for i in 0:total_bricks(t)-1])
+
+function bind_field!(g::TiledFieldGPU, prog)
+    for (i, id) in enumerate(g.tex)
+        bind_sampler(prog, "fieldTex_$(i - 1)", i - 1, GL.GL_TEXTURE_3D, id)
+    end
+    g
+end
+
+free_field!(g::TiledFieldGPU) = (for id in g.tex; GL.glDeleteTextures(1, Ref(id)); end)
+
+# ================================================================================================
+# Public constructor: `TiledFieldView(field)` returns an ordinary FieldView whose field is a
+# TiledField, so it renders oversized grids at full resolution. It auto-queries the hardware limit
+# when a GL context is current (falling back to a safe constant otherwise).
+# ================================================================================================
+function _query_3d_maxdim(; fallback::Integer = 2048)
+    v = Ref{GL.GLint}(0)
+    try
+        GL.glGetIntegerv(GL.GL_MAX_3D_TEXTURE_SIZE, v)
+        v[] > 0 ? Int(v[]) : fallback
+    catch
+        fallback
+    end
+end
+
+TiledFieldView(field; maxdim::Integer = _query_3d_maxdim(), kwargs...) =
+    FieldView(TiledField(field; maxdim = maxdim); kwargs...)
+
+# idempotent: already a TiledField → just wrap it in a view.
+TiledFieldView(t::TiledField; kwargs...) = FieldView(t; kwargs...)

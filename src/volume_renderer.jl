@@ -99,10 +99,36 @@ function FieldView(field; overlays = Overlay[], colormap::Symbol = :viridis,
               nothing, nothing, nothing, nothing, Ref{Union{Nothing,UInt64}}(nothing))
 end
 
+# One-time (per field object) guidance about 3D-texture limits. Dispatches on the concrete field type:
+# a plain oversized KeyedArray → would render black, so point at TiledFieldView; a TiledField with too
+# many bricks → units would collide with the pinned TF(14)/depth(15).
+const _WARNED_FOR_TILING = Set{UInt}()
+function _warn_about_tiling(view::FieldView)
+    f = view.field
+    oid = objectid(f)
+    oid in _WARNED_FOR_TILING && return
+    push!(_WARNED_FOR_TILING, oid)
+    if f isa TiledField
+        available = 14   # units 0..13; the renderer pins TF→14 and geometry-depth→15
+        if total_bricks(f) > available
+            @warn "tiled field needs $(total_bricks(f)) brick textures (> $available field texture units); " *
+                  "brick units would collide with the pinned TF(14)/depth(15). Reduce tiling (larger maxdim) or downscale the grid."
+        end
+    elseif f isa KeyedArray{<:Real,3}
+        maxdim = _query_3d_maxdim()
+        if maximum(size(f)) > maxdim
+            @warn "grid of size $(size(f)) exceeds GL_MAX_3D_TEXTURE_SIZE=$maxdim and will render black. " *
+                  "Wrap it in VolumeRendering.TiledFieldView(...) to render at full resolution."
+        end
+    end
+    nothing
+end
+
 # Build/rebuild GL resources to match the current field+region. The volume program bakes the field's
 # and region's GLSL, so it is rebuilt (and the field texture re-uploaded) whenever either changes —
 # e.g. `view.field = other`. Must be called with a current GL context.
 function _ensure_built!(view::FieldView)
+    _warn_about_tiling(view)
     view.vr === nothing && (view.vr = VolumeRenderer())
     fg = field_glsl_full(view.field); rg = region_glsl(view.region)
     if view.built_for != (fg, rg)
