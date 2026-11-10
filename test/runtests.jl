@@ -119,6 +119,7 @@ VolumeRendering.axis_index_glsl(k::UniformAxis, c) = "((" * c * ") - " * repr(k.
         end
 
         @testset "surface slice" begin
+            include("surface_slice.jl")
             A = KeyedArray(gaussian(xs, ys, zs); x = xs, y = ys, z = zs)
             topdown!(v) = (v.camera.projection = :ortho;
                            v.camera.eye = SVector(0.0, 0.0, 3.0); v.camera.lookat = SVector(0.0, 0.0, 0.0);

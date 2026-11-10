@@ -47,7 +47,7 @@ function draw!(o::SliceOverlay, ctx::GeomContext)
     GL.glDrawArrays(GL.GL_TRIANGLE_STRIP, 0, 4)
 end
 
-# ── SurfaceSliceOverlay: a region's near boundary, sampling the field, TF-colored ──
+# ── SurfaceSliceOverlay: region boundary clipped to the volume's AABB, TF-colored ──
 # SliceOverlay on a curved surface. surface_slice.frag injects the region snippet next to the field
 # one, so the program is PER-(FIELD, REGION) and relinked when either's GLSL changes.
 @kwdef mutable struct SurfaceSliceOverlay <: Overlay
@@ -68,7 +68,10 @@ function refresh!(o::SurfaceSliceOverlay, ctx::GeomContext)
 end
 
 function draw!(o::SurfaceSliceOverlay, ctx::GeomContext)
+    a, b = aabb(ctx.region)
+    lo, hi = min.(a, b), max.(a, b)
     prog = use!(o.gl)
+    uni_3f(prog, "fieldLo", lo...); uni_3f(prog, "fieldHi", hi...)
     set_camera_uniforms!(prog, ctx.cam, ctx.aspect)
     uni_m4(prog, "viewProj", ctx.viewproj)
     uni_i(prog, "interp", ctx.params.interp)
