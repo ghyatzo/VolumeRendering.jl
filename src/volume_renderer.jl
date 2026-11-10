@@ -104,20 +104,16 @@ function FieldView(field; overlays = Overlay[], colormap::Symbol = :viridis,
               nothing, nothing, nothing, nothing, Ref{Union{Nothing,UInt64}}(nothing))
 end
 
-# One-time (per field object) guidance about 3D-texture limits. Dispatches on the concrete field type:
-# a plain oversized KeyedArray → would render black, so point at TiledFieldView; a TiledField with too
-# many bricks → units would collide with the pinned TF(14)/depth(15).
+# Plain oversized arrays warn once; tiled fields must fit below the reserved TF(14)/depth(15) slots.
 const _WARNED_FOR_TILING = Set{UInt}()
 function _warn_about_tiling(view::FieldView)
     f = view.field
     oid = objectid(f)
     oid in _WARNED_FOR_TILING && return
-    push!(_WARNED_FOR_TILING, oid)
     if f isa TiledField
         available = 14   # units 0..13; the renderer pins TF→14 and geometry-depth→15
         if total_bricks(f) > available
-            @warn "tiled field needs $(total_bricks(f)) brick textures (> $available field texture units); " *
-                  "brick units would collide with the pinned TF(14)/depth(15). Reduce tiling (larger maxdim) or downscale the grid."
+            throw(ArgumentError("tiled field needs $(total_bricks(f)) brick textures, but only $available field texture units are available before the reserved TF(14)/depth(15) slots"))
         end
     elseif f isa KeyedArray{<:Real,3}
         maxdim = _query_3d_maxdim()
@@ -126,6 +122,7 @@ function _warn_about_tiling(view::FieldView)
                   "Wrap it in VolumeRendering.TiledFieldView(...) to render at full resolution."
         end
     end
+    push!(_WARNED_FOR_TILING, oid)
     nothing
 end
 

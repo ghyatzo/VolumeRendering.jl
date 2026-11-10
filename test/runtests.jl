@@ -48,6 +48,7 @@ VolumeRendering.axis_index_glsl(k::UniformAxis, c) = "((" * c * ") - " * repr(k.
 @testset "VolumeRendering" begin
     withctx() do
         xs = ys = zs = -1.0:0.05:1.0
+        include("tiling.jl")
 
         @testset "KeyedArray volume renders" begin
             v = FieldView(KeyedArray(gaussian(xs, ys, zs); x = xs, y = ys, z = zs))
