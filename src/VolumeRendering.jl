@@ -16,6 +16,7 @@ include("controls.jl")          # ShowControls panel (CImGui + ImPlot)
 export FieldView, render!, RenderParams, TransferFunction, Camera
 export default_window!, normalize_points!   # transfer-function window / opacity-curve helpers
 export FieldSource, GLSLField, axis_index_glsl
+export TiledField, TiledFieldView
 export Region, BoxRegion, SphereRegion
 # interface functions users overload for custom sources / regions:
 export field_glsl, region, value_range, fingerprint, upload_field, bind_field!, free_field!
