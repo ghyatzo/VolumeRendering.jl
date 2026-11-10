@@ -30,6 +30,32 @@
         end
     end
 
+    @testset "surface clipping with tiled fields" begin
+        w = 128
+        xy = -12.0:3.0:12.0
+        z = -5.0:5.0:5.0
+        field = KeyedArray(ones(Float32, length(xy), length(xy), length(z)), (xy, xy, z))
+        pixels = range(-12 + 12 / w, 12 - 12 / w; length = w)
+        ring = [75 <= x^2 + y^2 < 100 for x in pixels, y in pixels]
+        band = [x^2 + z^2 < 100 && abs(z) <= 5 for x in pixels, z in pixels]
+        for (eye, lookat, up, expected) in (
+            ((0, 0, 30), (0, 0, 0), (0, 1, 0), ring),
+            ((0, 30, 0), (0, 0, 0), (0, 0, 1), band),
+            ((0, 0, 0), (0, 1, 0), (0, 0, 1), band),
+        )
+            view = TiledFieldView(field; maxdim = 6,
+                                  overlays = [SurfaceSliceOverlay(SphereRegion(radius = 10))])
+            view.params.refine_samples = 1
+            view.camera.projection = :ortho
+            view.camera.eye = eye
+            view.camera.lookat = lookat
+            view.camera.up = up
+            view.camera.ortho_half = 12
+            @test (depthbuf(view, w) .< 1) == expected
+        end
+        @test GL.glGetError() == GL.GL_NO_ERROR
+    end
+
     @testset "sampling matches a single texture" begin
         field = KeyedArray([Float32(isodd(i) + j / 70 + k / 30)
                             for i in 1:9, j in 1:7, k in 1:3],
