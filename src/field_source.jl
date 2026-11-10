@@ -184,10 +184,6 @@ free_field!(::GLSLFieldGPU) = nothing
 # leaves the texture *incomplete*, so every sample reads 0 and the volume renders black. Tiling
 # splits each axis `d` into `k[d]` chunks so every brick dimension ≤ maxdim.
 #
-# THIS STEP defines only the pure, GPU-free tiling geometry: the type, how each brick's data is
-# extracted from the source (with its shared boundary texel), and the index mapping the shader will
-# mirror. The GL path (`field_glsl` / `upload_field` / `bind_field!`) arrives in later steps.
-#
 #   k[d] = tiles along axis d (1 = the axis is NOT tiled; it already fits)
 #   L[d] = chunk = non-overlapping source indices owned by each brick
 #   D[d] = per-brick texels along d = L[d] + 1 when tiled, else n[d]
@@ -201,9 +197,11 @@ struct TiledField <: FieldSource
 end
 
 function TiledField(field::KeyedArray{<:Real,3}; maxdim::Integer = 2048)
+    maxdim >= 2 || throw(ArgumentError("maxdim must be at least 2 to include shared boundary texels"))
     n  = size(field)
-    k  = ntuple(d -> n[d] > maxdim ? cld(n[d], maxdim) : 1, 3)
-    L  = ntuple(d -> cld(n[d], k[d]), 3)
+    all(>(0), n) || throw(ArgumentError("TiledField axes must not be empty"))
+    k  = ntuple(d -> n[d] > maxdim ? cld(n[d] - 1, maxdim - 1) : 1, 3)
+    L  = ntuple(d -> k[d] == 1 ? n[d] : cld(n[d] - 1, k[d]), 3)
     D  = ntuple(d -> k[d] == 1 ? n[d] : L[d] + 1, 3)
     TiledField(field, k, L, D)
 end
@@ -245,7 +243,7 @@ end
 # ================================================================================================
 # FieldSource interface for TiledField. Spatial extent and value range come from the inner grid
 # (unchanged → the world BoxRegion, camera framing and transfer-function window are identical to the
-# plain field). Only the GLSL/upload/bind parts differ (later steps).
+# plain field). Sampling, texture upload and binding use the brick layout.
 # ================================================================================================
 uses_transfer_function(t::TiledField) = uses_transfer_function(t.field)
 
@@ -260,7 +258,7 @@ fingerprint(t::TiledField) = (:tiled, objectid(t.field), t.k, t.L, t.D)
 # ================================================================================================
 # GLSL generation for a tiled field.
 #
-# Contract for brick ordering (shared with upload/bind in the next step): bricks are numbered by a
+# Contract for brick ordering (shared with upload/bind): bricks are numbered by a
 # flat index `flat = b1 * (k2*k3) + b2 * k3 + b3`, in lexicographic (b1,b2,b3) order. Samplers are
 # named `fieldTex_<flat>`. `_brick_coords` recovers (b1,b2,b3) from `flat`.
 # ================================================================================================
@@ -285,7 +283,7 @@ field_glsl(t::TiledField) = begin
         float g$d = $((gsrc[d]));
         int   b$d = clamp(int(floor(g$d / float($Ld))), 0, $kd-1);
         float l$d = clamp(g$d - float(b$d) * float($Ld), 0.0, float($Dd-1.0));
-        float u$d = (((interp == 0) ? floor(l$d) : l$d) + 0.5) / float($Dd);
+        float u$d = (((interp == 0) ? floor(l$d + 0.5) : l$d) + 0.5) / float($Dd);
         """
     end
 
