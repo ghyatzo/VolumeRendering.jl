@@ -44,6 +44,22 @@ end
     fly_speed::Float64 = 0.25
 end
 
+# shortcut: custom fields keep a 2048-step cap; a larger budget needs a minimum-step contract.
+_march_steps(field, radius, step_scale) = 2048
+_march_steps(field::TiledField, radius, step_scale) = _march_steps(field.field, radius, step_scale)
+
+function _march_steps(field::KeyedArray{<:Union{Real,Colorant},3}, radius, step_scale)
+    mincell = minimum(_axis_min_cell(axis) for axis in axiskeys(field))
+    dt = Float32(step_scale) * Float32(mincell)   # match the shader's spacing
+    isfinite(dt) && dt > 0 ||
+        throw(ArgumentError("Cartesian sample spacing must be finite and positive in Float32"))
+    # The region's bounding-sphere diameter bounds a ray's path through all bricks.
+    steps = ceil(2radius / Float64(dt)) + 1
+    1 <= steps <= typemax(GL.GLint) ||
+        throw(ArgumentError("ray sample budget must fit in a positive 32-bit integer; increase step_scale or reduce the region extent"))
+    Int(steps)
+end
+
 # ── shared per-program uniform groups ──
 function set_camera_uniforms!(prog, cam::Camera, aspect)
     right, up, fwd = view_basis(cam)
@@ -179,7 +195,7 @@ end
 # Progressive refinement: while the render_key is unchanged, successive frames re-march with a shifted
 # jitter (sampleIdx) and fold into accum_fb's running average, converging the jitter noise over
 # refine_samples frames. Any input change bumps the key → nsamp resets → the average restarts.
-function render_frame!(view::FieldView, gw, gh, vw, vh)
+function render_frame!(view::FieldView, gw, gh, vw, vh, steps)
     key = render_key(view, gw, gh, vw, vh)
     vr = view.vr
     @assert view.params.refine_samples >= 1 "refine_samples must be ≥ 1"
@@ -224,7 +240,7 @@ function render_frame!(view::FieldView, gw, gh, vw, vh)
     bind_tf_uniforms!(vr.volprog, view.tf)
     uni_i(vr.volprog, "mode", view.params.mode)
     uni_f(vr.volprog, "opacityScale", view.params.opacity_scale)
-    uni_i(vr.volprog, "steps", 2048)
+    uni_i(vr.volprog, "steps", steps)
     uni_f(vr.volprog, "stepScale", view.params.step_scale)
     uni_m4(vr.volprog, "invViewProj", ivp)
     uni_2i(vr.volprog, "geomSize", gw, gh); uni_2i(vr.volprog, "volSize", vw, vh)
@@ -268,9 +284,14 @@ end
 # side is capped at `params.max_render_px` (geometry stays full-res). A current GL context is required;
 # GL resources are allocated on the first call.
 function render!(view::FieldView, w::Integer, h::Integer)
+    step_scale = Float32(view.params.step_scale)
+    isfinite(step_scale) && step_scale > 0 ||
+        throw(ArgumentError("step_scale must be finite and positive in Float32"))
+    _, radius = bounds(view.region)
+    steps = _march_steps(view.field, radius, step_scale)
     _ensure_built!(view)
     gw = max(1, Int(w)); gh = max(1, Int(h))
     scale = min(1.0, view.params.max_render_px / max(gw, gh))
     vw = max(1, round(Int, gw * scale)); vh = max(1, round(Int, gh * scale))
-    render_frame!(view, gw, gh, vw, vh)
+    render_frame!(view, gw, gh, vw, vh, steps)
 end
