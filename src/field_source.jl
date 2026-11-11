@@ -224,7 +224,11 @@ end
 function brick_data(t::TiledField, b::NTuple{3,Int})
     A = parent(t.field)
     src = ntuple(d -> _brick_axis_index(t, d, b[d]), 3)
-    B = Array{eltype(A)}(undef, t.D)
+    _brick_data(A, src, t.D)
+end
+
+function _brick_data(A, src, dims)
+    B = Array{eltype(A)}(undef, dims)
     for I in CartesianIndices(B)
         B[I] = A[ntuple(d -> src[d][I[d]], 3)...]
     end

@@ -30,6 +30,15 @@
         end
     end
 
+    @testset "brick allocations" begin
+        dims = (64, 48, 8)
+        data = reshape(Float32.(1:prod(dims)), dims)
+        tiled = TiledField(KeyedArray(data, map(n -> 1:n, dims)); maxdim = 32)
+        brick = VolumeRendering.brick_data(tiled, (0, 0, 0))
+        @test brick == data[1:tiled.D[1], 1:tiled.D[2], 1:tiled.D[3]]
+        @test (@allocated VolumeRendering.brick_data(tiled, (0, 0, 0))) <= 2sizeof(brick) + 16_384
+    end
+
     @testset "surface clipping with tiled fields" begin
         w = 128
         xy = -12.0:3.0:12.0
