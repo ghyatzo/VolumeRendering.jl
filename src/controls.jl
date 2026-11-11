@@ -88,6 +88,7 @@ function ShowControls(view::FieldView)
     tf_field = uses_transfer_function(view.field)
 
     CImGui.SeparatorText("Rendering")
+    @c CImGui.Checkbox("Show volume", &params.show_volume)
     if tf_field
         let sel = _radio_row("mode", _MODES, params.mode)
             sel !== nothing && (params.mode = sel)

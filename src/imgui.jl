@@ -22,7 +22,7 @@ _drag(view::FieldView) = get!(() -> _Drag(false, false, false, false, false), _D
 # Draw `view` as an interactive image of `size` (ImGui item-size convention). Renders at device
 # resolution, shows the G-buffer V-flipped, and scopes camera input per-view (multi-view safe).
 function ShowVolume(view::FieldView; size::ImVec2 = ImVec2(-CImGui.FLT_MIN, -CImGui.FLT_MIN),
-                    controls::Bool = true)
+                    controls::Bool = true, camera_2d::Bool = false)
     sz = CImGui.CalcItemSize(size, 256.0, 256.0)                 # 256² default if a component is 0
     dw = max(1, round(Int, sz.x)); dh = max(1, round(Int, sz.y)) # on-screen logical points
     fbs = unsafe_load(CImGui.GetIO().DisplayFramebufferScale)    # Retina: (2,2)
@@ -32,13 +32,13 @@ function ShowVolume(view::FieldView; size::ImVec2 = ImVec2(-CImGui.FLT_MIN, -CIm
     CImGui.PushID(pointer_from_objref(view))                     # per-view id scoping
     ref = CImGui.ImTextureRef(CImGui.ImTextureID(UInt64(tex)))
     CImGui.Image(ref, ImVec2(dw, dh), ImVec2(0, 1), ImVec2(1, 0))   # flip V: GL origin is bottom-left
-    _handle_camera_input!(view, CImGui.IsItemHovered(), dw, dh)
+    _handle_camera_input!(view, CImGui.IsItemHovered(), dw, dh; camera_2d)
     CImGui.PopID()
     controls && _drag(view).controls_open && _controls_window!(view)
     nothing
 end
 
-function _handle_camera_input!(view::FieldView, hovered::Bool, w, h)
+function _handle_camera_input!(view::FieldView, hovered::Bool, w, h; camera_2d::Bool = false)
     io = CImGui.GetIO()
     d = unsafe_load(io.MouseDelta)
     drag = _drag(view); cam = view.camera; params = view.params
@@ -55,7 +55,7 @@ function _handle_camera_input!(view::FieldView, hovered::Bool, w, h)
         drag.rmb_on_widget = false
     end
 
-    if drag.rotating
+    if drag.rotating && !camera_2d
         dyaw = -d.x * ROT_SPEED; dpitch = -d.y * ROT_SPEED
         params.flymode ? flylook!(cam, dyaw, dpitch) : orbit!(cam, dyaw, -dpitch)
     elseif drag.panning
@@ -65,7 +65,7 @@ function _handle_camera_input!(view::FieldView, hovered::Bool, w, h)
     if hovered
         wheel = unsafe_load(io.MouseWheel)
         wheel != 0 && zoom!(cam, exp(-ZOOM_SPEED * wheel))
-        if params.flymode
+        if params.flymode && !camera_2d
             k(key) = CImGui.IsKeyDown(key) ? 1.0 : 0.0
             fwd = k(CImGui.ImGuiKey_W) - k(CImGui.ImGuiKey_S)
             rgt = k(CImGui.ImGuiKey_D) - k(CImGui.ImGuiKey_A)

@@ -57,6 +57,39 @@ VolumeRendering.axis_index_glsl(k::UniformAxis, c) = "((" * c * ") - " * repr(k.
             @test litfrac(b) > 0.02
         end
 
+        @testset "volume visibility preserves field-sampling overlays" begin
+            A = KeyedArray(gaussian(xs, ys, zs); x = xs, y = ys, z = zs)
+            for overlay in (SliceOverlay(:z), SurfaceSliceOverlay(SphereRegion(radius = 0.6)))
+                v = FieldView(A; overlays = [overlay])
+                @test v.params.show_volume
+                for mode in 0:2
+                    v.params.mode = mode
+                    _, visible = renderbuf(v, W)
+                    v.params.show_volume = false
+                    tex, slices = renderbuf(v, W)
+                    @test tex == v.vr.geom_fb.tex
+                    @test litfrac(slices) > 0.01
+                    @test slices != visible
+                    @test v.vr.nsamp == 1
+                    @test renderbuf(v, W) == (tex, slices)
+                    depth = depthbuf(v, W)
+                    outside = depth .== 1
+                    @test any(outside)
+                    @test all(iszero, slices[1:3, :, :][:, outside])
+                    overlay.enabled = false
+                    _, empty = renderbuf(v, W)
+                    @test all(iszero, empty[1:3, :, :])
+                    v.params.show_volume = true
+                    _, volume = renderbuf(v, W)
+                    @test litfrac(volume) > 0.02
+                    overlay.enabled = true
+                    @test renderbuf(v, W)[2] == visible
+                    @test v.field === A
+                    @test GL.glGetError() == GL.GL_NO_ERROR
+                end
+            end
+        end
+
         @testset "coordinate mapping (x>0 field → image right)" begin
             step = Float64[x > 0 ? 1.0 : 0.0 for x in xs, y in ys, z in zs]
             v = FieldView(KeyedArray(step; x = xs, y = ys, z = zs))

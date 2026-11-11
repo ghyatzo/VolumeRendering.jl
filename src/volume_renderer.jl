@@ -34,6 +34,7 @@ end
 
 # All shader-driving state that isn't the camera, transfer function, field, or region.
 @kwdef mutable struct RenderParams
+    show_volume::Bool = true   # overlays sample the field independently of the volume pass
     mode::Int = 0               # 0 emission-absorption, 1 MIP, 2 average
     interp::Int = 1             # 0 nearest, 1 trilinear (the field snippet may honor this)
     step_scale::Float64 = 0.5   # adaptive step dt = step_scale · stepSize(pos) — quality knob
@@ -174,7 +175,7 @@ render_key(view::FieldView, gw, gh, vw, vh) = hash((
     view.camera.eye, view.camera.lookat, view.camera.up, view.camera.projection,
     view.camera.fov, view.camera.ortho_half,
     view.params.mode, view.params.interp, view.params.step_scale, view.params.opacity_scale,
-    view.params.refine_samples,
+    view.params.refine_samples, view.params.show_volume,
     fingerprint(view.field), fingerprint(view.region),
     view.tf.colormap, view.tf.logscale, view.tf.lo, view.tf.hi, view.tf.opacity_pts,
     Tuple(overlay_fingerprint(o) for o in view.overlays),
@@ -199,7 +200,7 @@ function render_frame!(view::FieldView, gw, gh, vw, vh, steps)
     key = render_key(view, gw, gh, vw, vh)
     vr = view.vr
     @assert view.params.refine_samples >= 1 "refine_samples must be ≥ 1"
-    nmax = view.params.refine_samples
+    nmax = view.params.show_volume ? view.params.refine_samples : 1
     refining = nmax > 1
     # Nothing changed and the target sample count reached → the finished image is already cached.
     key == view.last_key[] && vr.nsamp >= nmax && return refining ? vr.accum_fb.tex : vr.geom_fb.tex
@@ -227,6 +228,11 @@ function render_frame!(view::FieldView, gw, gh, vw, vh, steps)
     GL.glClearColor(0, 0, 0, 1); GL.glClearDepth(1.0)
     GL.glClear(GL.GL_COLOR_BUFFER_BIT | GL.GL_DEPTH_BUFFER_BIT)
     geometry_pass!(view, ctx)
+    if !view.params.show_volume
+        vr.nsamp = 1
+        GL.glBindFramebuffer(GL.GL_FRAMEBUFFER, prev_fbo[])
+        return vr.geom_fb.tex
+    end
 
     # ── Pass 2: volume march (low-res), clipped at the geometry depth ──
     GL.glBindFramebuffer(GL.GL_FRAMEBUFFER, vr.vol_fb.fbo); GL.glViewport(0, 0, vw, vh)
