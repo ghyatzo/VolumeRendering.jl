@@ -2,9 +2,17 @@
 
 # ── Colormap (§4.1) ──
 
+"""    Colormap(scheme::ColorScheme, window::ClosedInterval; log = false)
+
+Maps values in `window` onto the colour scheme (a ColorSchemes.jl object), linearly or, with `log = true`, in log
+scale; values outside the window clamp to its ends. `window` is in value units in both cases; a log window must be
+positive.
+
+Mutable and shared by reference: setting `scheme`, `window` or `log` updates every [`Mapped`](@ref) that uses it.
+"""
 mutable struct Colormap
     scheme::ColorScheme
-    window::ClosedInterval{Float64}   # value units, also when log
+    window::ClosedInterval{Float64}
     log::Bool
 
     Colormap(scheme, window, log) = validate(new(scheme, window, log))
@@ -20,6 +28,13 @@ end
 
 # ── Mapped (§4.2) ──
 
+"""    Mapped(source, colormap::Colormap)
+
+A colour from a scalar `source` through `colormap`. `source` is a `:scalar` field, or per-vertex values
+(`Vector{Vector{<:Real}}`, nested like a [`Lines`](@ref) mark's polylines).
+
+Mutable and shared by reference: setting `source` or `colormap` updates every mark that uses it.
+"""
 mutable struct Mapped
     source::Any
     colormap::Colormap
@@ -49,6 +64,22 @@ color_kind(f) = isfield(f) && value_kind(f) === :color ? :color_field :
 
 # ── marks (§5) ──
 
+"""    Volume(color; region, extinction = [SVector(0.0, 0.0), SVector(1.0, 1.0)], mode = :dvr, density = 1.0, step_scale = 0.5, label = nothing)
+
+A mark ray-marching `color` through the shape `region`. `color` is a [`Mapped`](@ref) scalar field or a `:color`
+field.
+
+- `mode`: `:dvr` (emission–absorption), `:mip` (maximum) or `:average` along the ray; `:mip` and `:average` need a
+  `Mapped` colour.
+- `extinction`: for a `Mapped` colour, extinction σ as a piecewise-linear function of the colormap position `u`:
+  `(u, σ)` points sorted in `u`, all coordinates in `0..1`; at least two. A `:color` field brings its own σ (alpha).
+- `density`: σ scale (DVR).
+- `step_scale`: the march step is `step_scale × stepSize(p)` of the field.
+- `label`: the mark's title in the controls panel.
+
+A volume is translucent: composited over the opaque marks in list order with other translucent marks, unsorted.
+Overlapping volumes are marched separately, not jointly.
+"""
 Base.@kwdef mutable struct Volume
     color::Any
     region::Any
@@ -63,6 +94,14 @@ Base.@kwdef mutable struct Volume
 end
 Volume(color; kw...) = Volume(; color, kw...)
 
+"""    Surface(shape; color = RGB(0.5, 0.5, 0.55), opacity = 1.0, label = nothing)
+
+A mark drawing the surface of `shape`. `color` is a constant `Color` (no alpha), a [`Mapped`](@ref) scalar field, or a
+`:color` field, evaluated on the surface.
+
+With `opacity < 1` the surface is translucent: both its front and back faces are blended, composited in list order
+with the other translucent marks, unsorted. Opaque faces that coincide resolve by list order (later on top).
+"""
 Base.@kwdef mutable struct Surface
     shape::Any
     color::Any = RGB(0.5, 0.5, 0.55)
@@ -73,6 +112,16 @@ Base.@kwdef mutable struct Surface
 end
 Surface(shape; kw...) = Surface(; shape, kw...)
 
+"""    Lines(polylines; color = RGB(0.8, 0.8, 0.85), width_px = 1.0, label = nothing)
+
+A mark drawing `polylines` (`Vector{Vector{SVector{3,Float64}}}`), `width_px` device pixels wide, hard-edged.
+`color` is a constant `Color` (no alpha), per-vertex `Color`s, a [`Mapped`](@ref) of per-vertex values or of a scalar
+field, or a `:color` field. Per-vertex vectors are nested like `polylines`.
+
+The `polylines` and per-vertex vectors are uploaded once per array: assign new arrays to change them, in-place edits
+are not seen. Depth is constant across a line's width, so lines lying exactly on a sloped surface may lose edge
+pixels.
+"""
 Base.@kwdef mutable struct Lines
     polylines::Vector{Vector{SVector{3,Float64}}}
     color::Any = RGB(0.8, 0.8, 0.85)
@@ -130,13 +179,30 @@ jittered(::Union{Surface,Lines}) = false
 
 # ── View (§8) ──
 
+"""    View(marks; camera::Camera, background = RGB(0.0, 0.0, 0.0), max_volume_px = 2048, refine_frames = 16,
+         flymode = false, fly_speed)
+
+A scene: the `marks` ([`Volume`](@ref), [`Surface`](@ref), [`Lines`](@ref)), drawn depth-composited, seen through
+`camera`. Opaque marks are depth-tested; translucent ones composite in list order.
+
+- `max_volume_px`: volumes are marched at most this many device pixels along the image's longer side, then upscaled.
+- `refine_frames`: while nothing changes, this many jittered frames are averaged to smooth volume sampling noise;
+  `1` disables.
+- `flymode`, `fly_speed`: navigation in [`ShowView`](@ref): fly with WASD at `fly_speed` world units per frame
+  instead of orbiting; the default speed is 1/200 of the camera's distance to `lookat` (ortho: of `ortho_half`).
+
+Everything is plain mutable data, read at each render: set properties of the view, its camera, marks, fields and
+colormaps to update; add or remove marks in `view.marks` to show or hide them. Nothing touches the GPU until the first
+[`render!`](@ref), which renders only when something changed. `view.initial_camera` keeps a copy of `camera` for
+[`reset!`](@ref) and as the [`zoom!`](@ref) reference.
+"""
 mutable struct View
     marks::Vector{Any}
     camera::Camera
-    initial_camera::Camera       # reset!(view) restores it; zoom clamps relative to it
+    initial_camera::Camera
     background::RGB{Float64}
-    max_volume_px::Int           # cap on the volume march's long side (device px)
-    refine_frames::Int           # jittered frames averaged while idle; 1 disables
+    max_volume_px::Int
+    refine_frames::Int
     flymode::Bool
     fly_speed::Float64
     cache::Union{Nothing,ResourceCache}   # created by the first render!
@@ -157,7 +223,6 @@ end
 
 default_fly_speed(cam::Camera) = (cam.projection === :ortho ? cam.ortho_half : distance(cam)) / 200
 
-# in place: hosts may hold a reference to view.camera
 reset!(view::View) = (reset!(view.camera, view.initial_camera); view)
 
 # ── snapshot (§7.3): identity leaves only for bulk arrays, everything else by value; O(marks), never O(data) ──

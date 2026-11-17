@@ -20,6 +20,15 @@ drag_state(view::View) = get!(() -> Drag(false, false, false, false, false), DRA
 # ImGui IDs from the object itself, so a shared object keeps one widget state wherever it appears
 push_id(x) = CImGui.PushID(Ptr{Cvoid}(objectid(x)))
 
+"""    VolumeRendering.ShowView(view; size = ImVec2(-CImGui.FLT_MIN, -CImGui.FLT_MIN), controls = true)
+
+Draw `view` as an interactive image in the current Dear ImGui window, filling `size` (by default the remaining
+content region; CImGui item-size rules), rendered at device-pixel resolution. Not exported.
+
+Over the image: drag orbits, right/middle drag pans, the wheel zooms. With `view.flymode`, drag looks around and
+W/A/S/D/Space/C fly, Shift faster. With `controls = true`, a right-click without drag toggles a floating window with
+[`ShowControls`](@ref).
+"""
 function ShowView(view::View; size::ImVec2 = ImVec2(-CImGui.FLT_MIN, -CImGui.FLT_MIN), controls::Bool = true)
     sz = CImGui.CalcItemSize(size, 256, 256)   # 256 for a zero component
     dw, dh = max(1, round(Int, sz.x)), max(1, round(Int, sz.y))   # logical points
@@ -80,8 +89,19 @@ end
 
 # ── controls panel (§9.2) ──
 
+"""    VolumeRendering.controls!(x)
+
+Dear ImGui widgets for the settings of `x`, emitted in its section of [`ShowControls`](@ref). Defined for `View`,
+the marks, `Colormap` and `GridField`; define it for a custom field type to give that field a section.
+"""
 function controls! end
 
+"""    VolumeRendering.ShowControls(view)
+
+Emit the settings panel of `view` into the current Dear ImGui window: a section for the view, one per mark, one per
+distinct field with a [`controls!`](@ref) method, and one per distinct `Colormap`. Edits assign the objects' properties.
+Not exported.
+"""
 function ShowControls(view::View)
     section("View", view)
     foreach(((i, m),) -> section(something(m.label, "$(nameof(typeof(m))) $i"), m), pairs(view.marks))

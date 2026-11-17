@@ -2,6 +2,17 @@
 
 # ── Texture (§2.1) ──
 
+"""    Texture(data; wrap = :clamp, filter = :linear)
+
+A 1-, 2- or 3-D array for a field's GLSL to sample as `uniform samplerND <name>` (see [`textures`](@ref)). Array
+dim 1, 2, 3 are the texture's s, t, r. Elements: `Real` → one float channel (`.r`); `Colorant` → RGBA, 8-bit for
+fixed-point colours (`N0f8`), float otherwise.
+
+`wrap` is `:clamp`, `:repeat` or `:mirror`, one per dim or one for all; `filter` is `:linear` or `:nearest`.
+
+The upload is cached by the identity of `data` (unwrapped from a `KeyedArray`): a texture with a new array uploads
+it, while in-place edits of an uploaded array are not seen.
+"""
 struct Texture{N,A<:AbstractArray{<:Any,N}}
     data::A
     wrap::NTuple{N,Symbol}
@@ -23,14 +34,77 @@ cache_key(data::AbstractArray) = AxisKeys.keyless_unname(data)
 
 # ── field interface (§2) and the parts shared with shapes (§3) ──
 
+"""    field_glsl(f)::String
+
+The GLSL of a field `f`; with [`value_kind`](@ref), the required part of the field interface. Any type implementing
+it is a field; extend these functions qualified (`VolumeRendering.field_glsl(f::MyField) = …`).
+
+The GLSL defines `float value(vec3 p)` (a `:scalar` field) or `vec4 value(vec3 p)` (a `:color` field: rgb emission and
+extinction per unit length in alpha, not premultiplied), and `float stepSize(vec3 p)`, the positive march step
+scale at `p`. It may define helpers, but declares no uniforms or samplers — those come from [`textures`](@ref) and
+[`uniforms`](@ref) — and has no `#version` line. Fields and shapes assembled into one program share a namespace:
+helper names must not collide, and `vr_`/`gl_` prefixes are reserved.
+
+`field_glsl`, `textures` and `uniforms` are called every frame: keep them cheap, and store the arrays in `f`.
+Optional parts: [`textures`](@ref), [`uniforms`](@ref), [`value_range`](@ref), [`controls!`](@ref).
+"""
 function field_glsl end
+
+"""    value_kind(f)::Symbol
+
+`:scalar` or `:color`: what the field's GLSL `value` returns (see [`field_glsl`](@ref)).
+"""
 function value_kind end
+
+"""    textures(x)::NamedTuple
+
+Textures of a field, as `name => Texture`; each is declared for its GLSL as `uniform samplerND <name>`. Defaults to
+none. Return the same `Texture` arrays every call: uploads are cached by array identity. A program has at most 16
+samplers, the renderer's own included.
+"""
 textures(_) = (;)
+
+"""    uniforms(x)::NamedTuple
+
+Uniforms of a field or shape, as `name => value`, declared for its GLSL as `uniform <type> <name>`. Defaults to
+none. Value types: `Bool`, `Integer`, `Real`, `SVector`s of 2–4 integers or reals, 3×3 or 4×4 `SMatrix`
+(column-major: GLSL `M[col][row]`).
+
+Names of uniforms and textures must be valid GLSL identifiers, not keywords, not `value`, `stepSize`, `main`, not
+starting with `vr_` or `gl_`, and unique among all objects assembled into one program.
+"""
 uniforms(_) = (;)
+
+"""    value_range(f)
+    value_range(values::Vector{<:Vector{<:Real}})
+
+The range of a scalar field's values, as a `ClosedInterval`, for building a [`Colormap`](@ref) window; `0.0..1.0`
+unless a field type defines it. For per-vertex values, their NaN-skipping extrema. The renderer never reads it.
+"""
 value_range(_) = 0.0..1.0
 
+"""    shape_glsl(s)::String
+
+The GLSL of a shape `s`; with [`bounds`](@ref) and [`aabb`](@ref), the required part of the shape interface. Any type
+implementing them is a shape, usable as a Volume region or a Surface; extend these functions qualified. Optional:
+[`uniforms`](@ref).
+
+The GLSL defines `vec2 vr_hit(vec3 ro, vec3 rd)`: the ray parameters of entry and exit along the ray `ro + t·rd`
+(`rd` unit length), unclamped (negative is behind the eye), with exit < entry on a miss. Shapes must be convex: one
+entry and one exit per ray.
+"""
 function shape_glsl end
+
+"""    bounds(s)
+
+A sphere enclosing the shape `s`, as `(; center, radius)`; `Camera(; bounds(s)...)` frames it.
+"""
 function bounds end
+
+"""    aabb(s)
+
+The axis-aligned bounding box of the shape `s`, as `(; lo, hi)` corner `SVector`s.
+"""
 function aabb end
 
 # interface conformance: the required methods exist
@@ -41,6 +115,20 @@ nan_extrema(itr) = ((lo, hi) = extrema(Iterators.filter(!isnan, itr)); convert(F
 
 # ── GridField (§2.2) ──
 
+"""    GridField(A::KeyedArray; interpolation = :linear)
+
+A field sampled from a grid. Dim names choose the coordinates, in any order:
+- `(x, y, z)`: Cartesian; [`Box(g)`](@ref Box) is the box of its keys;
+- `(lon, lat)`: directions from the origin, in radians (or dimensionless Unitful angles); longitude wraps around.
+  As a Volume source its region must exclude the origin, where the march step shrinks to 0.
+
+Axis keys are `Real` ranges; other axis types need an [`axis_index_glsl`](@ref) method. `Real` elements make a
+`:scalar` field; `Colorant` elements a `:color` field (rgb emission, alpha extinction). `interpolation` is `:linear` or
+`:nearest`.
+
+Mutable: assign `g.data` or `g.interpolation`. The data are uploaded once per array: assign a new array to change them,
+in-place edits are not seen.
+"""
 mutable struct GridField
     data::KeyedArray
     interpolation::Symbol
@@ -69,7 +157,11 @@ coordvar(::LonLat, name) = (lon = "vr_lon", lat = "vr_lat")[name]
 # numbers (u"°" → radians), dimensionful ones throw
 glsl_float(x) = string(convert(Float64, x))
 
-# fractional 0-based cell index along `key` of the GLSL expression `coordvar`; extension seam for other axis types
+"""    axis_index_glsl(key, coordvar::AbstractString)::String
+
+GLSL expression mapping the coordinate held by the GLSL expression `coordvar` to a fractional 0-based cell index along
+the axis keys `key`. Defined for `AbstractRange`s; add a method to use another axis type in a [`GridField`](@ref).
+"""
 axis_index_glsl(key::AbstractRange, coordvar::AbstractString)::String =
     "(($coordvar) - $(glsl_float(first(key)))) * $(glsl_float(inv(convert(Float64, step(key)))))"
 
@@ -119,6 +211,11 @@ data_range(A::AbstractArray{<:Real}) = nan_extrema(A)
 
 # ── GLSLField (§2.3) ──
 
+"""    GLSLField(glsl; kind = :scalar, textures = (;), uniforms = (;), value_range = 0.0..1.0)
+
+A field given directly by its GLSL: each argument is what the corresponding interface function returns (see
+[`field_glsl`](@ref)). Immutable: build a new one to change it.
+"""
 struct GLSLField
     glsl::String
     kind::Symbol
@@ -142,32 +239,46 @@ value_range(f::GLSLField) = f.value_range
 
 # ── built-in shapes (§3) ──
 
+"""    Sphere(; center = SVector(0.0, 0.0, 0.0), radius)
+
+A sphere shape.
+"""
 struct Sphere
     center::SVector{3,Float64}
     radius::Float64
 end
 Sphere(; center = SVector(0.0, 0.0, 0.0), radius) = Sphere(center, radius)
 
+"""    Box(x, y, z)
+    Box(g::GridField)
+
+An axis-aligned box shape, from three `ClosedInterval`s (`Box(-1..1, -1..1, 0..2)`), or the box of the keys of a
+Cartesian grid.
+"""
 struct Box
     x::ClosedInterval{Float64}
     y::ClosedInterval{Float64}
     z::ClosedInterval{Float64}
 end
 
-# the bounding box of a Cartesian grid's keys
 Box(g::GridField) = grid_box(coordinates(g.data), g.data)
 grid_box(::Cartesian, A) =
     Box(map(k -> convert(Float64, minimum(k))..convert(Float64, maximum(k)), values(named_axiskeys(A)[(:x, :y, :z)]))...)
 grid_box(::LonLat, A) = throw(ArgumentError("Box(::GridField) needs a Cartesian (x, y, z) grid, got (lon, lat)"))
 
-# the parallelogram {origin + s·u + t·v, s,t ∈ [0,1]}
+"""    Plane(origin, u, v)
+    Plane(axis::Symbol, pos, box::Box)
+
+A flat parallelogram shape `{origin + s·u + t·v : s, t ∈ [0, 1]}`, or the cross-section of `box` at `axis = pos`
+(`axis` is `:x`, `:y` or `:z`).
+"""
 struct Plane
     origin::SVector{3,Float64}
     u::SVector{3,Float64}
     v::SVector{3,Float64}
 end
 
-# the box's cross-section {axis = pos}; u, v span the two other axes in x, y, z order
+# u, v span the two other axes in x, y, z order
 function Plane(axis::Symbol, pos::Real, box::Box)
     i = findfirst(==(axis), (:x, :y, :z))
     isnothing(i) && throw(ArgumentError("Plane axis must be :x, :y or :z, got $(repr(axis))"))

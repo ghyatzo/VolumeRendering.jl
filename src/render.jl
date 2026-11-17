@@ -487,6 +487,15 @@ end
 # the running mean while refining, else the scene
 displayed(view::View) = refine_target(view) > 1 ? view.cache.accum_fb.color : view.cache.scene_fb.color
 
+"""    render!(view, w, h)
+
+Render `view` at `w × h` device pixels into a GL texture owned by the view, and return the texture's id for the host
+to display (rows bottom-up, as GL stores them). Needs a current OpenGL 4.1 core context; the host's framebuffer binding
+is restored.
+
+When nothing changed since the last call, returns the same texture without rendering; while volume refinement runs
+(see [`View`](@ref)), each call adds one frame.
+"""
 function render!(view::View, w::Integer, h::Integer)
     w >= 1 && h >= 1 || throw(ArgumentError("render! needs w, h ≥ 1, got $w × $h"))
     validate(view); foreach(validate, view.marks)
@@ -523,6 +532,11 @@ end
 # GL layout (x, y from the bottom) → standard image layout (row, col from the top)
 image_layout(A::AbstractMatrix) = reverse(permutedims(A); dims = 1)
 
+"""    render_image(view, w, h)::Matrix{RGB{N0f8}}
+
+Render `view` at `w × h` pixels, refinement included, and read the image back: `h × w`, row 1 at the top. Needs a
+current OpenGL 4.1 core context.
+"""
 function render_image(view::View, w::Integer, h::Integer)
     foreach(_ -> render!(view, w, h), 1:refine_target(view))
     image_layout(map(c -> RGB{N0f8}(c), read_texture(displayed(view))))
@@ -532,6 +546,11 @@ end
 depth_image(view::View, w::Integer, h::Integer) =
     (render!(view, w, h); image_layout(map(d -> d.d, read_texture(view.cache.scene_fb.depth))))
 
+"""    free!(view)
+
+Delete the view's GL resources, in its context; the next [`render!`](@ref) starts over. Optional: resources of marks
+removed from a view are freed on its next rendered frame anyway.
+"""
 function free!(view::View)
     isnothing(view.cache) || free!(view.cache)
     view.cache = nothing; view.last = nothing; view.nsamp = 0
