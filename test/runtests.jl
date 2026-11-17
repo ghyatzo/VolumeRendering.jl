@@ -23,6 +23,12 @@ using TestItemRunner
         """
     const empty_vao = VR.gen(GL.glGenVertexArrays)
 
+    # looking down -z from z = `eye` with screen-up +y: world +x → image right, +y → image up
+    topcam(half = 1.0; projection = :ortho, eye = 3.0) =
+        VR.Camera(VR.SVector(0.0, 0.0, eye), VR.SVector(0.0, 0.0, 0.0), VR.SVector(0.0, 1.0, 0.0), projection, 90.0, half)
+    # world (x, y) of the centre of image pixel (row, col) under `topcam(half)` with a square w×w image
+    pixel_xy(half, w, row, col) = (half * ((col - 0.5) / w * 2 - 1), half * (1 - (row - 0.5) / w * 2))
+
     # draw `count` vertices (× `instances`) with `prog` into `fb`; `setup()` runs with the program current
     function draw(setup, prog, fb; count = 3, instances = nothing, vao = empty_vao, mode = GL.GL_TRIANGLES)
         GL.glBindFramebuffer(GL.GL_FRAMEBUFFER, fb.fbo)
@@ -496,15 +502,16 @@ end
 end
 
 @testitem "Colormap, Mapped" begin
+    using ColorSchemes
     import VolumeRendering as VR
     using IntervalSets, AxisKeys
-    c = Colormap(:viridis, 0..1)
-    @test (c.scheme, c.window, c.log) == (:viridis, 0.0..1.0, false)
-    @test Colormap(:afmhot, 1e-3..1.0; log = true).log
-    @test_throws "minimum < maximum" Colormap(:viridis, 1..1)
-    @test_throws "minimum < maximum" Colormap(:viridis, 2..1)
-    @test_throws "positive" Colormap(:viridis, 0..1; log = true)
-    @test_throws "positive" Colormap(:viridis, -1..1; log = true)
+    c = Colormap(ColorSchemes.viridis, 0..1)
+    @test (c.scheme, c.window, c.log) == (ColorSchemes.viridis, 0.0..1.0, false)
+    @test Colormap(ColorSchemes.afmhot, 1e-3..1.0; log = true).log
+    @test_throws "minimum < maximum" Colormap(ColorSchemes.viridis, 1..1)
+    @test_throws "minimum < maximum" Colormap(ColorSchemes.viridis, 2..1)
+    @test_throws "positive" Colormap(ColorSchemes.viridis, 0..1; log = true)
+    @test_throws "positive" Colormap(ColorSchemes.viridis, -1..1; log = true)
 
     g = GridField(KeyedArray(rand(2, 2, 2); x = 0:1, y = 0:1, z = 0:1))
     vals = [[1.0, NaN], [-2.0, 3.0, 0.5]]
@@ -515,15 +522,17 @@ end
     @test_throws "Mapped source" Mapped(colorfield, c)
     @test_throws "Mapped source" Mapped(1.0, c)
     @test_throws MethodError Mapped(g, :viridis)
+    @test_throws MethodError Colormap(:viridis, 0..1)                 # the scheme is a ColorScheme object, not a name
 end
 
 @testitem "marks: construction and validate" begin
+    using ColorSchemes
     import VolumeRendering as VR
     using AxisKeys, IntervalSets, ColorTypes, StaticArrays
 
     g = GridField(KeyedArray(rand(2, 2, 2); x = 0:1, y = 0:1, z = 0:1))
     rgba = GridField(KeyedArray(rand(RGBA{Float32}, 2, 2, 2); x = 0:1, y = 0:1, z = 0:1))
-    m = Mapped(g, Colormap(:viridis, 0..1))
+    m = Mapped(g, Colormap(ColorSchemes.viridis, 0..1))
     box = Box(g)
     pl = [[SVector(0.0, 0, 0), SVector(1.0, 0, 0)], [SVector(0.0, 1, 0), SVector(1.0, 1, 0), SVector(1.0, 2, 0)]]
 
@@ -542,6 +551,8 @@ end
     @test_throws "at least 2" Volume(m; region = box, extinction = [SVector(0.0, 0.0)])
     @test_throws "sorted" Volume(m; region = box, extinction = [SVector(1.0, 0.0), SVector(0.0, 1.0)])
     @test_throws "0..1" Volume(m; region = box, extinction = [SVector(0.0, 0.0), SVector(1.0, 2.0)])
+    @test_throws "density" Volume(m; region = box, density = 0)
+    @test_throws "step_scale" Volume(m; region = box, step_scale = -1)
     @test Volume(rgba; region = box, extinction = SVector{2,Float64}[]).extinction == []   # only for Mapped colours
 
     s = Surface(Sphere(radius = 1))
@@ -578,7 +589,7 @@ end
     m.colormap.log = false; m.source = rgba
     @test_throws "Mapped source" VR.validate(s)
 
-    @test VR.jittered(Volume(Mapped(g, Colormap(:viridis, 0..1)); region = box))
+    @test VR.jittered(Volume(Mapped(g, Colormap(ColorSchemes.viridis, 0..1)); region = box))
     @test !VR.jittered(l) && !VR.jittered(Surface(box))
 end
 
@@ -631,9 +642,14 @@ end
     @test reset!(v) === v && v.camera === cam                            # restored in place
     @test all(n -> getfield(cam, n) == getfield(Camera(; radius = 2), n), fieldnames(Camera))
     @test View(Any[]; camera = cam, fly_speed = 1, refine_frames = 1).fly_speed == 1
+    @test_throws "refine_frames" View(Any[]; camera = cam, refine_frames = 0)
+    @test_throws "max_volume_px" View(Any[]; camera = cam, max_volume_px = 0)
+    v.refine_frames = 0                                                  # plain assignment; caught at render
+    @test_throws "refine_frames" VR.validate(v)
 end
 
 @testitem "snapshot" begin
+    using ColorSchemes
     import VolumeRendering as VR
     using AxisKeys, IntervalSets, ColorTypes, StaticArrays
 
@@ -641,7 +657,7 @@ end
     pl, vals = [[SVector(0.0, 0, 0), SVector(1.0, 0, 0)]], [[NaN, 1.0]]
     function scene(A)
         g = GridField(A)
-        m = Mapped(g, Colormap(:viridis, 0..1))
+        m = Mapped(g, Colormap(ColorSchemes.viridis, 0..1))
         vol = Volume(m; region = Box(g))
         sl = Surface(Plane(:z, 2, Box(g)); color = m)
         ln = Lines(pl; color = Mapped(vals, m.colormap))
@@ -655,7 +671,7 @@ end
     @test isequal(snap(sc.view), snap(sc.view))                     # NaN leaves compare equal to themselves
     @test isequal(snap(sc.view), snap(scene(A).view))               # equal values, distinct objects (same bulk arrays)
     @test !isequal(VR.snapshot(sc.view, 64, 48), VR.snapshot(sc.view, 65, 48))
-    @test same(() -> sc.m.colormap = Colormap(:viridis, 0..1))       # equal values → equal
+    @test same(() -> sc.m.colormap = Colormap(ColorSchemes.viridis, 0..1))       # equal values → equal
     @test same(() -> sc.g.data = KeyedArray(A; x = 1:4, y = 1:4, z = 1:4))   # new wrapper, same parent array
     @test same(() -> A[1] = 99)                                      # in-place edit: undetected (documented)
     @test same(() -> sc.ln.polylines[1][1] = SVector(5.0, 0, 0))
@@ -664,6 +680,7 @@ end
     @test !same(() -> sc.ln.color.source = [[NaN, 1.0]])
     @test !same(() -> sc.m.colormap.window = 0..2)
     @test !same(() -> sc.m.colormap.log = true)
+    @test !same(() -> sc.m.colormap.scheme = ColorSchemes.inferno)
     @test !same(() -> sc.g.interpolation = :nearest)
     @test !same(() -> sc.vol.extinction[2] = SVector(1.0, 0.5))     # by value, also in place
     @test !same(() -> sc.vol.region = Box(0..1, 0..1, 0..1))
@@ -701,6 +718,500 @@ end
         @test compile("uniform $sampler grid;\n$(field_glsl(f))\nout vec4 frag; void main() { vec3 p = vec3(1.0); frag = $out + stepSize(p); }")
     end
     VR.glcheck()
+end
+
+@testitem "program assembly" begin
+    import VolumeRendering as VR
+    using StaticArrays, ColorTypes, ColorSchemes, IntervalSets
+    cam = Camera(; radius = 1)
+
+    # §2 uniform type table
+    for (x, T) in [(true, "bool"), (3, "int"), (Int8(3), "int"), (2.5, "float"), (1//2, "float"), (π, "float"),
+                   (SVector(1, 2), "ivec2"), (SVector(1, 2, 3, 4), "ivec4"), (SVector(1.0, 2.0, 3.0), "vec3"),
+                   (SVector(1f0, 2f0, 3f0, 4f0), "vec4"), (SMatrix{3,3}(1.0:9), "mat3"), (SMatrix{4,4}(1:16), "mat4")]
+        @test VR.uniform_decl(:k, x) == "uniform $T k;\n"
+    end
+    for bad in [SVector(1.0), SVector{5}(1.0:5), SMatrix{2,2}(1.0:4), [1.0, 2.0], "s", :s, 1.0 + 2im, nothing]
+        @test_throws "uniform k: unsupported" VR.uniform_decl(:k, bad)
+    end
+
+    cmap = Colormap(ColorSchemes.gray1, 0.5..2.0)
+    glsl = "float value(vec3 p) { return 0.0; } float stepSize(vec3 p) { return 1.0; }"
+    surf(f; shape = Sphere(radius = 1)) = Surface(shape; color = Mapped(f, cmap))
+
+    # declarations in §6.4 order; field textures take units 0, 1, … and the colormap follows
+    f = GLSLField(glsl; textures = (; a = Texture(rand(2, 2, 2)), b = Texture(rand(4))), uniforms = (; k = 1.0, R = SMatrix{3,3}(1.0:9)))
+    d = VR.assemble(surf(f; shape = Box(0..1, 0..1, 0..1)), cam, 64, 48)
+    @test occursin("""
+        uniform sampler3D a;
+        uniform sampler1D b;
+        uniform float k;
+        uniform mat3 R;
+        uniform vec3 box_lo;
+        uniform vec3 box_hi;
+        uniform sampler1D vr_cmap;
+        uniform float vr_cmap_lo, vr_cmap_hi;
+        uniform float vr_opacity;
+        """, d.frag)
+    @test startswith(d.frag, "#version 410 core\n")
+    @test occursin(glsl, d.frag) && occursin("vec2 vr_hit", d.frag)
+    @test findfirst(glsl, d.frag)[1] < findfirst("vec2 vr_hit", d.frag)[1] < findfirst("float vr_norm", d.frag)[1] <
+          findfirst("vec4 vr_color", d.frag)[1] < findfirst("void main", d.frag)[1]
+    @test map(u -> u.name, d.units) == [:a, :b, :vr_cmap]
+    @test (d.uniforms.k, d.uniforms.R, d.uniforms.box_lo, d.uniforms.vr_cmap_lo, d.uniforms.vr_cmap_hi, d.uniforms.vr_opacity) ==
+          (1.0, SMatrix{3,3}(1.0:9), [0, 0, 0], 0.5, 2.0, 1.0)
+    @test d.uniforms.vr_viewport === SVector(64.0, 48.0) && d.uniforms.vr_aspect == 64 / 48
+
+    # the colormap's log flag is baked into the text; the window is uploaded as log(lo), log(hi)
+    cmap.log = true
+    dl = VR.assemble(surf(f; shape = Box(0..1, 0..1, 0..1)), cam, 64, 48)
+    @test occursin("log(max(v, 1e-30))", dl.frag) && !occursin("log(max(v, 1e-30))", d.frag)
+    @test (dl.uniforms.vr_cmap_lo, dl.uniforms.vr_cmap_hi) == (log(0.5), log(2.0))
+    cmap.log = false
+
+    # one program text per structure: values go to uniforms
+    s1 = VR.assemble(Surface(Sphere(radius = 1); color = RGB(1.0, 0, 0)), cam, 64, 48)
+    s2 = VR.assemble(Surface(Sphere(; center = SVector(1.0, 2, 3), radius = 2); color = RGB(0.0, 1, 0), opacity = 1), cam, 32, 32)
+    @test (s1.vert, s1.frag) == (s2.vert, s2.frag)
+    @test s2.uniforms.vr_rgb === SVector(0f0, 1f0, 0f0) && s2.uniforms.sphere_radius == 2
+    pl = [[SVector(0.0, 0, 0), SVector(1.0, 0, 0)]]
+    srcs = map(c -> (d = VR.assemble(Lines(pl; color = c), cam, 64, 48); (d.vert, d.frag)),
+               [RGB(1.0, 0, 0), [[RGB(1.0, 0, 0), RGB(0.0, 1, 0)]], Mapped([[1.0, 2.0]], cmap), Mapped(f, cmap)])
+    @test allunique(srcs)
+    @test occursin("layout(location = 2) in vec3 vr_pa;", srcs[2][1]) && occursin("in vec3 vr_vrgb;", srcs[2][2])
+    @test occursin("layout(location = 2) in float vr_pa;", srcs[3][1]) && occursin("in float vr_vval;", srcs[3][2])
+    @test !occursin("vr_pa", srcs[1][1])
+
+    # error paths, all before any GL call
+    many(n) = GLSLField(glsl; textures = NamedTuple{Tuple(Symbol.("t", 1:n))}(ntuple(_ -> Texture(rand(4)), n)))
+    @test length(VR.assemble(surf(many(15)), cam, 64, 48).units) == 16      # 15 field textures + the colormap
+    @test_throws "17 samplers, more than GL_MAX_TEXTURE_IMAGE_UNITS = 16" VR.assemble(surf(many(16)), cam, 64, 48)
+    @test_throws "uniform k: unsupported" VR.assemble(surf(GLSLField(glsl; uniforms = (; k = [1.0]))), cam, 64, 48)
+    @test_throws "declared by both" VR.assemble(surf(GLSLField(glsl; uniforms = (; sphere_radius = 1.0))), cam, 64, 48)
+    @test_throws "vr_" VR.assemble(surf(GLSLField(glsl; uniforms = (; vr_k = 1.0))), cam, 64, 48)
+    @test_throws "unsupported" VR.assemble(Lines(pl; color = Mapped(GLSLField(glsl; uniforms = (; k = "x")), cmap)), cam, 64, 48)
+
+    # §6.7 impostor rectangle: projected aabb ±1 px, clamped; full screen when a corner is behind the eye
+    top = Camera(SVector(0.0, 0, 3), SVector(0.0, 0, 0), SVector(0.0, 1, 0), :ortho, 90.0, 2.0)
+    @test VR.impostor_rect(Box(-1..0.5, 0..1, -1..1), top, 40, 20) ≈ [-0.25 - 0.05, 0 - 0.1, 0.125 + 0.05, 0.5 + 0.1]
+    @test VR.impostor_rect(Box(-9..9, 0..1, -1..1), top, 40, 20) ≈ [-1.05, -0.1, 1.05, 0.6]
+    persp = Camera(SVector(0.0, 0, 3), SVector(0.0, 0, 0), SVector(0.0, 1, 0), :perspective, 90.0, 1.0)
+    @test VR.impostor_rect(Sphere(; center = SVector(0.0, 0, 2.5), radius = 1), persp, 40, 20) == [-1, -1, 1, 1]
+end
+
+@testitem "render! frame protocol" setup = [GLContext] begin
+    import ModernGL as GL, VolumeRendering as VR
+    using StaticArrays, ColorTypes, FixedPointNumbers
+    red, blue, green = RGB{N0f8}(1, 0, 0), RGB{N0f8}(0, 0, 1), RGB{N0f8}(0, 1, 0)
+    scene() = View([Surface(Sphere(radius = 0.5); color = RGB(1.0, 0, 0))]; camera = GLContext.topcam(), background = RGB(0.0, 0.0, 1.0))
+    view = scene()
+    @test_throws ArgumentError render!(view, 0, 8)
+    @test_throws ArgumentError render!(view, 8, 0)
+    @test isnothing(view.cache)
+
+    # hostile host state; every pass sets its own and the host's framebuffer is restored
+    host = VR.scene_framebuffer(4, 4)
+    GL.glBindFramebuffer(GL.GL_FRAMEBUFFER, host.fbo)
+    GL.glEnable(GL.GL_SCISSOR_TEST); GL.glScissor(0, 0, 1, 1)
+    GL.glEnable(GL.GL_CULL_FACE); GL.glCullFace(GL.GL_FRONT_AND_BACK)
+    GL.glColorMask(false, false, false, false); GL.glDepthMask(false); GL.glDepthFunc(GL.GL_NEVER); GL.glDepthRange(0.5, 0.5)
+    GL.glEnable(GL.GL_BLEND); GL.glBlendFunc(GL.GL_ZERO, GL.GL_ZERO); GL.glPolygonMode(GL.GL_FRONT_AND_BACK, GL.GL_LINE)
+    tex = render!(view, 32, 24)
+    fbo = Ref{GL.GLint}(0); GL.glGetIntegerv(GL.GL_FRAMEBUFFER_BINDING, fbo)
+    @test fbo[] == host.fbo
+    @test tex == view.cache.scene_fb.color.id && view.nsamp == 1
+    img = render_image(view, 32, 24)
+    GL.glDisable(GL.GL_SCISSOR_TEST); GL.glDisable(GL.GL_CULL_FACE); GL.glCullFace(GL.GL_BACK)
+    GL.glColorMask(true, true, true, true); GL.glDepthMask(true); GL.glDepthFunc(GL.GL_LESS); GL.glDepthRange(0, 1)
+    GL.glDisable(GL.GL_BLEND); GL.glBlendFunc(GL.GL_ONE, GL.GL_ZERO); GL.glPolygonMode(GL.GL_FRONT_AND_BACK, GL.GL_FILL)
+    GL.glBindFramebuffer(GL.GL_FRAMEBUFFER, 0)
+    @test img == render_image(scene(), 32, 24)                       # same as with clean state
+    @test size(img) == (24, 32) && count(==(blue), img) + count(==(red), img) == 24 * 32
+    @test count(==(red), img) ≈ π * 6^2 rtol = 0.1
+
+    # render on demand: an unchanged snapshot skips the frame entirely (the clobbered scene stays)
+    clobber!() = (GL.glBindFramebuffer(GL.GL_FRAMEBUFFER, view.cache.scene_fb.fbo); GL.glClearColor(0, 1, 0, 1);
+                  GL.glClear(GL.GL_COLOR_BUFFER_BIT); GL.glBindFramebuffer(GL.GL_FRAMEBUFFER, 0))
+    clobber!()
+    @test render!(view, 32, 24) == tex && view.nsamp == 1
+    view.marks[1].color = RGB(1.0, 0, 0)                              # equal value
+    @test all(==(green), render_image(view, 32, 24))
+    view.marks[1].shape = Sphere(radius = 0.75)
+    big = render_image(view, 32, 24)
+    @test count(==(red), big) ≈ π * 9^2 rtol = 0.1
+    clobber!()
+    @test !any(==(green), render_image(view, 33, 24))                # a size change re-renders
+    @test count(==(red), render_image(view, 32, 24)) == count(==(red), big)
+
+    # validation runs at render
+    view.marks[1].opacity = 2
+    @test_throws "opacity" render!(view, 32, 24)
+    view.marks[1].opacity = 1
+    view.refine_frames = 0
+    @test_throws "refine_frames" render!(view, 32, 24)
+    view.refine_frames = 16
+
+    # free! deletes every GL resource; the next render! starts over
+    prog = only(values(view.cache.entries)); scene_fb = view.cache.scene_fb
+    @test free!(view) === nothing
+    @test isnothing(view.cache) && GL.glIsFramebuffer(scene_fb.fbo) == GL.GL_FALSE
+    GL.glUseProgram(0)                                                # a deleted program stays alive while current (GL rule)
+    @test GL.glIsProgram(prog.id) == GL.GL_FALSE
+    @test render_image(view, 32, 24) == big
+    free!(view); free!(view)                                          # idempotent
+    VR.gl_delete(host)
+    VR.glcheck()
+end
+
+@testitem "depth and placement" setup = [GLContext] begin
+    import VolumeRendering as VR
+    using StaticArrays, ColorTypes, FixedPointNumbers, IntervalSets
+    red, green = RGB{N0f8}(1, 0, 0), RGB{N0f8}(0, 1, 0)
+    sphere(r = 1.0; center = SVector(0.0, 0, 0)) = Surface(Sphere(; center, radius = r); color = RGB(1.0, 0, 0))
+    line(pts...) = Lines([collect(pts)]; color = RGB(0.0, 1, 0))
+    top = GLContext.topcam()
+
+    # opaque sphere silhouette: exactly the pixel centres inside the disc (ortho), area π r² (perspective)
+    img = render_image(View([sphere(0.5)]; camera = top), 64, 64)
+    @test (img .== red) == [hypot(GLContext.pixel_xy(1, 64, r, c)...) < 0.5 for r in 1:64, c in 1:64]
+    persp = render_image(View([sphere(1.0)]; camera = GLContext.topcam(; projection = :perspective)), 64, 64)
+    @test count(==(red), persp) == count(hypot(r - 32.5, c - 32.5) < tan(asin(1 / 3)) * 32 for r in 1:64, c in 1:64)   # angular radius asin(1/3), fs = 1
+
+    # a face-on Plane equals the near face of the Box it cuts
+    box = Box(-0.5..0.5, -0.4..0.3, -0.5..0.5)
+    oblique = Camera(SVector(0.3, 0.2, 3), SVector(0.0, 0, 0), SVector(0.0, 1, 0), :perspective, 40.0, 1.0)
+    faceon(shape) = View([Surface(shape; color = RGB(1.0, 0, 0))]; camera = Camera(SVector(0.1, -0.1, 3), SVector(0.1, -0.1, 0), SVector(0.0, 1, 0), :perspective, 40.0, 1.0))
+    @test render_image(faceon(box), 48, 40) == render_image(faceon(Plane(:z, 0.5, box)), 48, 40)
+    @test VR.depth_image(faceon(box), 48, 40) ≈ VR.depth_image(faceon(Plane(:z, 0.5, box)), 48, 40) rtol = 1e-6
+    @test count(==(red), render_image(faceon(Plane(:z, 0.5, box)), 48, 40)) > 300
+
+    # eye inside a sphere: its far surface fills the view at t = radius
+    inside = Camera(SVector(0.0, 0, 0), SVector(0.0, 0, -1), SVector(0.0, 1, 0), :perspective, 60.0, 1.0)
+    @test all(==(red), render_image(View([sphere(1.0)]; camera = inside), 16, 12))
+    @test VR.depth_image(View([sphere(1.0)]; camera = inside), 16, 12) ≈ fill(1e-6, 12, 16) rtol = 1e-5
+
+    # a 1 px line lands on the computed pixel row; a new polylines vector moves it
+    ln = line(SVector(-0.9, 0.335, 0), SVector(0.9, 0.335, 0))       # pixel y = 26.7 from the bottom of 40 → row 14
+    v = View([ln]; camera = top)
+    @test findall(==(green), render_image(v, 40, 40)[:, 20]) == [14]
+    ln.polylines = [[SVector(-0.9, -0.2125, 0), SVector(0.9, -0.2125, 0)]]   # pixel y = 15.75 → row 25
+    @test findall(==(green), render_image(v, 40, 40)[:, 20]) == [25]
+
+    # list-order tie rule: a line tangent to an opaque sphere at its pole (exact depth tie at the centre pixel)
+    top2 = GLContext.topcam(2.0)
+    tangent = line(SVector(-1.0, 0, 1), SVector(1.0, 0, 1))
+    alone = render_image(View([tangent]; camera = top2), 65, 65) .== green
+    @test count(alone) == 33 && alone[33, 33]
+    @test VR.depth_image(View([tangent]; camera = top2), 65, 65)[33, 33] == VR.depth_image(View([sphere()]; camera = top2), 65, 65)[33, 33]
+    @test (render_image(View([sphere(), tangent]; camera = top2), 65, 65) .== green) == alone      # listed after: no pixel lost
+    before = render_image(View([tangent, sphere()]; camera = top2), 65, 65)
+    @test (before .== green) == (alone .& ((1:65) .!= 33)') && before[33, 33] == red               # listed before: hidden where it touches
+
+    # a line behind an opaque sphere is hidden, in front is not
+    row = findall(==(green), render_image(View([line(SVector(-0.9, 0.078125, 0.8), SVector(0.9, 0.078125, 0.8))]; camera = top), 32, 32)[:, 10])
+    behind = render_image(View([sphere(0.5), line(SVector(-0.9, 0.078125, -0.8), SVector(0.9, 0.078125, -0.8))]; camera = top), 32, 32)
+    front = render_image(View([sphere(0.5), line(SVector(-0.9, 0.078125, 0.8), SVector(0.9, 0.078125, 0.8))]; camera = top), 32, 32)
+    @test only(row) == 15
+    @test all(==(red), behind[15, 12:21]) && behind[15, 3] == green
+    @test all(==(green), front[15, 3:30])
+
+    # orientation: a mark in the upper-left world quadrant lands at low row / low column, in both readbacks
+    v = View([sphere(0.25; center = SVector(-0.5, 0.5, 0))]; camera = top)
+    img, dep = render_image(v, 40, 32), VR.depth_image(v, 40, 32)
+    @test size(img) == size(dep) == (32, 40)
+    hit = findall(==(red), img)
+    @test !isempty(hit) && all(i -> i[1] <= 16 && i[2] <= 20, hit)
+    @test findall(>(0), dep) == hit
+end
+
+@testitem "ray hits: Sphere, Box, Plane" setup = [GLContext] begin
+    import VolumeRendering as VR
+    using StaticArrays, ColorTypes, IntervalSets, LinearAlgebra
+    # independent Float64 reference: the pixel-centre ray of §6.1 and analytic hits
+    function ray(cam, w, h, row, col)
+        right, up, fwd = VR.view_basis(cam); fs = VR.fovscale(cam)
+        x, y = (col - 0.5) / w * 2 - 1, (h - row + 0.5) / h * 2 - 1
+        cam.projection === :ortho ? (cam.eye + x * fs * w / h * right + y * fs * up, fwd) :
+                                    (cam.eye, normalize(fwd + x * fs * w / h * right + y * fs * up))
+    end
+    function hit(s::Sphere, ro, rd)
+        oc = ro - s.center; b = dot(oc, rd); disc = b^2 - (dot(oc, oc) - s.radius^2)
+        disc < 0 ? NaN : (t = -b - sqrt(disc); t > 0 ? t : -b + sqrt(disc))
+    end
+    function hit(bx::Box, ro, rd)
+        (; lo, hi) = aabb(bx); t0, t1 = (lo - ro) ./ rd, (hi - ro) ./ rd
+        tn, tf = maximum(min.(t0, t1)), minimum(max.(t0, t1))
+        tn <= tf ? (tn > 0 ? tn : tf) : NaN
+    end
+    function hit(p::Plane, ro, rd)
+        n = cross(p.u, p.v); t = dot(p.origin - ro, n) / dot(rd, n); q = ro + t * rd - p.origin
+        s, w = dot(q, p.u) / dot(p.u, p.u), dot(q, p.v) / dot(p.v, p.v)
+        0 <= s <= 1 && 0 <= w <= 1 ? t : NaN
+    end
+    near(cam) = 1e-6 * (cam.projection === :ortho ? cam.ortho_half : VR.distance(cam))
+    expected(shape, cam, w, h) = [(t = hit(shape, ray(cam, w, h, r, c)...); isnan(t) || t <= 0 ? 0.0 : near(cam) / t) for r in 1:h, c in 1:w]
+    depth(shape, cam, w, h) = VR.depth_image(View([Surface(shape)]; camera = cam), w, h)
+
+    oblique(proj) = Camera(SVector(2.0, -1.5, 2.5), SVector(0.1, 0.0, -0.1), SVector(0.0, 0, 1), proj, 50.0, 1.3)
+    shapes = [Sphere(; center = SVector(0.1, 0.2, -0.1), radius = 0.8), Box(-0.6..0.5, -0.4..0.7, -0.5..0.3),
+              Plane(SVector(-0.5, -0.6, 0.1), SVector(1.1, 0.2, 0.0), SVector(0.1, 0.3, 0.9))]
+    for shape in shapes, proj in (:perspective, :ortho)
+        cam = oblique(proj)
+        d, e = depth(shape, cam, 48, 40), expected(shape, cam, 48, 40)
+        ok = (d .> 0) .== (e .> 0)
+        @test count(!, ok) <= 3                                       # silhouette pixels may round either way
+        @test d[ok .& (e .> 0)] ≈ e[ok .& (e .> 0)] rtol = 1e-4
+        @test count(e .> 0) > 100
+    end
+
+    # axis-aligned ortho view of a Box: rd has exact zero components (the rd == 0 slab path)
+    cam = GLContext.topcam(1.0)
+    d = depth(Box(-0.5..0.25, -0.25..0.5, -1..0.5), cam, 32, 32)
+    inbox = [(xy = GLContext.pixel_xy(1, 32, r, c); -0.5 < xy[1] < 0.25 && -0.25 < xy[2] < 0.5) for r in 1:32, c in 1:32]
+    @test d == ifelse.(inbox, Float32(1e-6 / 2.5), 0f0)
+end
+
+@testitem "Lines colours and coverage" setup = [GLContext] begin
+    import VolumeRendering as VR
+    using StaticArrays, ColorTypes, FixedPointNumbers, ColorSchemes, IntervalSets
+    top = GLContext.topcam()
+    xy(r, c) = GLContext.pixel_xy(1, 64, r, c)
+    P(r, c) = SVector(xy(r, c)..., 0.0)                     # world point at the centre of pixel (row, col)
+    img(lines...) = render_image(View(collect(Any, lines); camera = top), 64, 64)
+    lit(im) = im .!= RGB{N0f8}(0, 0, 0)
+    gray(c) = (float(c.r) + float(c.g) + float(c.b)) / 3
+    near(a, b) = maximum(abs, a .- b) < 0.01
+    cmap = Colormap(ColorSchemes.gray1, 0..1)
+    pl = [[P(20, 9), P(20, 57)]]                            # x from -0.734 to 0.766, along row 20
+    # attributes interpolate over the quad, whose caps extend the 48 px segment by ½ px and carry the endpoint values
+    f = ((0:48) .+ 0.5) ./ 49
+    xs = xy(20, 9)[1] .+ f .* (xy(20, 57)[1] - xy(20, 9)[1])
+
+    # constant
+    im = img(Lines(pl; color = RGB(0.2, 0.4, 0.6)))
+    @test findall(lit(im)) == CartesianIndex.(20, 9:57)
+    @test all(==(RGB{N0f8}(0.2, 0.4, 0.6)), im[20, 9:57])
+
+    # per-vertex colours, interpolated along the segment
+    im = img(Lines(pl; color = [[RGB(1.0, 0, 0), RGB(0.0, 0, 1)]]))
+    @test near(map(c -> float(c.r), im[20, 9:57]), 1 .- f)
+    @test near(map(c -> float(c.b), im[20, 9:57]), f)
+
+    # Mapped(values) through the colormap window
+    im = img(Lines(pl; color = Mapped([[0.0, 2.0]], Colormap(ColorSchemes.gray1, 0..2))))
+    @test near(gray.(im[20, 9:57]), f)
+
+    # Mapped(field) samples the field at the fragment's world position
+    fx = GLSLField("float value(vec3 p) { return 0.5 * p.x + 0.5; } float stepSize(vec3 p) { return 1.0; }")
+    im = img(Lines(pl; color = Mapped(fx, cmap)))
+    @test near(gray.(im[20, 9:57]), 0.5 .* xs .+ 0.5)
+
+    # :color field
+    yellow_top = GLSLField("vec4 value(vec3 p) { return vec4(1.0, p.y > 0.0 ? 1.0 : 0.0, 0.0, 1.0); } float stepSize(vec3 p) { return 1.0; }";
+                           kind = :color)
+    im = img(Lines([[P(5, 30), P(60, 30)]]; color = yellow_top))
+    @test all(==(RGB{N0f8}(1, 1, 0)), im[5:32, 30]) && all(==(RGB{N0f8}(1, 0, 0)), im[33:60, 30])
+
+    # a zero-length segment draws a one-pixel dot; NaN-free
+    @test findall(lit(img(Lines([[P(40, 11), P(40, 11)]])))) == [CartesianIndex(40, 11)]
+
+    # a corner between two segments has no gap: exactly the pixels of both arms
+    im = img(Lines([[P(10, 10), P(10, 30), P(50, 30)]]))
+    @test findall(lit(im)) == sort([CartesianIndex.(10, 10:30); CartesianIndex.(11:50, 30)])
+
+    # several polylines in one mark; one-point polylines contribute no segment
+    im = img(Lines([[P(5, 5), P(5, 9)], [P(60, 60)], [P(30, 2), P(30, 3)]]))
+    @test findall(lit(im)) == sort([CartesianIndex.(5, 5:9); CartesianIndex.(30, 2:3)])
+    @test !any(lit(img(Lines(Vector{SVector{3,Float64}}[]))))
+end
+
+@testitem "Lines eye-plane clip" setup = [GLContext] begin
+    import VolumeRendering as VR
+    using StaticArrays, ColorTypes
+    cam = GLContext.topcam(; projection = :perspective)              # w = 3 - z
+    w(p) = 3 - p[3]
+    # Float64 reference of §6.7: move the behind endpoint along the segment to w = 1e-4 × the front endpoint's w
+    clipped(a, b) = a + (b - a) * ((1 - 1e-4) * w(a) / (w(a) - w(b)))
+    img(pl) = render_image(View([Lines([pl])]; camera = cam), 48, 48)
+    a = SVector(0.2, 0.013, 0.0)
+    for ratio in (1e1, 1e3, 1e4, 1e5, 1e6, 1e7), dir in (SVector(-0.4, 0.3), SVector(0.0, 0.0))
+        b = SVector(a[1] + dir[1] * ratio, a[2] + dir[2] * ratio, 3 + 3ratio)   # w(b) = -ratio × w(a)
+        ref = img([a, clipped(a, b)])
+        @test count(!=(RGB{VR.N0f8}(0, 0, 0)), ref) > 10
+        @test img([a, b]) == ref
+        @test img([b, a]) == ref
+    end
+end
+
+@testitem "uniform upload: bool, int, ivec, mat4" setup = [GLContext] begin
+    import VolumeRendering as VR
+    using StaticArrays, ColorTypes, FixedPointNumbers
+    M = SMatrix{4,4}(reshape(0.0:15, 4, 4) ./ 16)
+    f = GLSLField("""
+        vec4 value(vec3 p) { return vec4(flag && k == 3 ? 1.0 : 0.0, float(n.z - n.x) * 0.2, M[1][2], 1.0); }
+        float stepSize(vec3 p) { return 1.0; }
+        """; kind = :color, uniforms = (; flag = true, k = 3, n = SVector(1, 2, 3), M))
+    img = render_image(View([Surface(Sphere(radius = 0.5); color = f)]; camera = GLContext.topcam()), 8, 8)
+    @test img[4, 4] == RGB{N0f8}(1, 0.4, M[3, 2])                    # GLSL M[col][row]: column-major upload, no transpose
+end
+
+@testitem "(lon, lat) GridField on a Surface(Sphere)" setup = [GLContext] begin
+    import VolumeRendering as VR
+    using StaticArrays, ColorTypes, ColorSchemes, IntervalSets, AxisKeys
+    lat = range(-5π / 12; step = π / 6, length = 6)               # cell centres -75°…75°
+    lon = range(0.0; step = π / 6, length = 12)                    # 0…330°: wraps between the last and first cells
+    side = Camera(SVector(5.0, 0, 0), SVector(0.0, 0, 0), SVector(0.0, 0, 1), :ortho, 45.0, 1.2)   # screen right = +y, up = +z
+    shell(A; interpolation) = View([Surface(Sphere(radius = 1); color = Mapped(GridField(A; interpolation), Colormap(ColorSchemes.gray1, 0..1)))];
+                                    camera = side)
+
+    # one bright cell at lat = 45°, lon = 30° lights the upper-right quadrant only
+    A = KeyedArray(zeros(6, 12); lat, lon)
+    A[5, 2] = 1
+    im = render_image(shell(A; interpolation = :nearest), 48, 48)
+    bright = findall(c -> c.r > 0.5, im)
+    @test length(bright) > 10 && all(i -> i[1] < 24 && i[2] > 24, bright)
+
+    # smooth data bright across the lon seam (lon = 0 faces the camera): no dark column
+    B = KeyedArray([(1 + cos(lo)) / 2 for la in lat, lo in lon]; lat, lon)
+    im = render_image(shell(B; interpolation = :linear), 48, 48)
+    mid = map(c -> float(c.r), im[24, 12:37])
+    @test minimum(mid) > 0.8
+    @test maximum(abs, diff(mid)) < 0.03
+end
+
+@testitem "user-defined field type and Shape" setup = [GLContext] begin
+    import VolumeRendering as VR
+    using StaticArrays, ColorTypes, FixedPointNumbers, ColorSchemes, IntervalSets
+
+    # the PlasmaScope shape of field: 3-D :repeat texture, 2-D LUT, mat3 rotation uniform
+    mutable struct Striped
+        arr::Array{Float32,3}
+        lut::Matrix{Float32}
+        R::SMatrix{3,3,Float64,9}
+    end
+    VR.value_kind(::Striped) = :scalar
+    VR.textures(f::Striped) = (; rho = Texture(f.arr; wrap = (:repeat, :clamp, :clamp), filter = :nearest), lut = Texture(f.lut; filter = :nearest))
+    VR.uniforms(f::Striped) = (; Rt = f.R')
+    VR.field_glsl(::Striped) = """
+        float value(vec3 p) {
+            vec3 q = Rt * p;
+            return texture(rho, vec3(q.x, 0.5, 0.5)).r + texture(lut, vec2(0.5, 0.5 * q.y + 0.5)).r;
+        }
+        float stepSize(vec3 p) { return 0.1; }
+        """
+    rot(a) = SMatrix{3,3}(cos(a), sin(a), 0, -sin(a), cos(a), 0, 0, 0, 1)
+    f = Striped(reshape(Float32[0, 0.5], 2, 1, 1), reshape(Float32[0, 0.25], 1, 2), rot(0))
+    view = View([Surface(Plane(:z, 0, Box(-1..1, -1..1, -1..1)); color = Mapped(f, Colormap(ColorSchemes.gray1, 0..1)))];
+                camera = GLContext.topcam())
+    # x-stripes of period 1 (wrap :repeat also for x < 0) plus 0.25 for y > 0, in the rotated frame q = Rᵀ p
+    function expected(R)
+        map(CartesianIndices((64, 64))) do I
+            q = R' * SVector(GLContext.pixel_xy(1, 64, Tuple(I)...)..., 0.0)
+            (mod(q[1], 1) >= 0.5 ? 0.5 : 0.0) + (q[2] > 0 ? 0.25 : 0.0)
+        end
+    end
+    gray(im) = map(c -> float(c.r), im)
+    @test maximum(abs, gray(render_image(view, 64, 64)) - expected(rot(0))) < 0.01
+    f.R = rot(π / 2)
+    @test maximum(abs, gray(render_image(view, 64, 64)) - expected(rot(π / 2))) < 0.01
+
+    # a user-defined Shape: an ellipsoid
+    struct Ellipsoid
+        center::SVector{3,Float64}
+        axes::SVector{3,Float64}
+    end
+    VR.shape_glsl(::Ellipsoid) = """
+        vec2 vr_hit(vec3 ro, vec3 rd) {
+            vec3 o = (ro - ell_center) / ell_axes, d = rd / ell_axes;
+            float a = dot(d, d), b = dot(o, d), c = dot(o, o) - 1.0, disc = b * b - a * c;
+            if (disc < 0.0) return vec2(1e30, -1e30);
+            float s = sqrt(disc); return vec2((-b - s) / a, (-b + s) / a);
+        }
+        """
+    VR.uniforms(e::Ellipsoid) = (; ell_center = e.center, ell_axes = e.axes)
+    VR.bounds(e::Ellipsoid) = (; e.center, radius = maximum(e.axes))
+    VR.aabb(e::Ellipsoid) = (; lo = e.center - e.axes, hi = e.center + e.axes)
+    e = Ellipsoid(SVector(0.1, -0.2, 0.0), SVector(0.7, 0.35, 0.5))
+    im = render_image(View([Surface(e; color = RGB(1.0, 0, 0))]; camera = GLContext.topcam()), 64, 64)
+    inside = [(xy = GLContext.pixel_xy(1, 64, r, c); ((xy[1] - 0.1) / 0.7)^2 + ((xy[2] + 0.2) / 0.35)^2 < 1) for r in 1:64, c in 1:64]
+    @test count((im .== RGB{N0f8}(1, 0, 0)) .!= inside) <= 2
+    @test count(inside) > 500
+end
+
+@testitem "resource cache through render!" setup = [GLContext] begin
+    import ModernGL as GL, VolumeRendering as VR
+    using StaticArrays, ColorTypes, ColorSchemes, IntervalSets, AxisKeys
+    entries(view, T) = filter(x -> x isa T, collect(values(view.cache.entries)))
+    top = GLContext.topcam()
+    pl = [[SVector(-0.8, 0.01, 0), SVector(0.8, 0.01, 0)]]
+
+    # a Mapped window change re-renders without re-uploading the vertex buffer
+    cmap = Colormap(ColorSchemes.gray1, 0..1)
+    lines = Lines(pl; color = Mapped([[0.0, 1.0]], cmap))
+    view = View([lines]; camera = top)
+    im1 = render_image(view, 32, 32)
+    buf = only(entries(view, VR.InstanceBuffer))
+    cmap.window = 0..2
+    im2 = render_image(view, 32, 32)
+    @test im1 != im2
+    @test only(entries(view, VR.InstanceBuffer)) === buf && GL.glIsBuffer(buf.vbo) == GL.GL_TRUE
+    cmap.log = true; cmap.window = 0.1..1
+    @test render_image(view, 32, 32) ∉ (im1, im2)
+    @test only(entries(view, VR.InstanceBuffer)) === buf
+
+    # a removed mark's resources are freed on the next rendered frame and re-created when re-added
+    g = GridField(KeyedArray(rand(4, 8); lat = range(-1.2, 1.2; length = 4), lon = range(0, 2π; length = 9)[1:8]))
+    surf = Surface(Sphere(radius = 0.5); color = Mapped(g, cmap))
+    view = View([surf, lines]; camera = top)
+    full = render_image(view, 32, 32)
+    tex, buf = only(entries(view, VR.GLTexture{Float32,2})), only(entries(view, VR.InstanceBuffer))
+    lut = only(entries(view, VR.GLTexture{RGBA{Float32},1}))
+    bound(unit) = (GL.glActiveTexture(GL.GL_TEXTURE0 + unit); r = Ref{GL.GLint}(-1); GL.glGetIntegerv(GL.GL_SAMPLER_BINDING, r); r[])
+    @test bound(0) == bound(1) == 0                                   # sampler objects unbound after the frame
+    @test length(entries(view, VR.Program)) == 2 && length(entries(view, VR.GLSampler)) == 2   # (clamp, repeat) grid, (clamp,) colormap
+    deleteat!(view.marks, 2)
+    render!(view, 32, 32)
+    @test isempty(entries(view, VR.InstanceBuffer)) && GL.glIsBuffer(buf.vbo) == GL.GL_FALSE
+    @test only(entries(view, VR.GLTexture{Float32,2})) === tex && length(entries(view, VR.Program)) == 1
+    push!(view.marks, lines)
+    @test render_image(view, 32, 32) == full
+    @test length(entries(view, VR.InstanceBuffer)) == 1 && only(entries(view, VR.GLTexture{RGBA{Float32},1})) === lut
+    view.marks = [lines]                                              # texture, colormap LUT and samplers freed
+    render!(view, 32, 32)
+    @test GL.glIsTexture(tex.id) == GL.GL_FALSE && GL.glIsTexture(lut.id) == GL.GL_TRUE    # the lines still use the colormap
+    @test length(entries(view, VR.GLSampler)) == 1
+
+    # program count = number of distinct source texts
+    view = View([Surface(Sphere(radius = 0.2)), Surface(Sphere(; center = SVector(0.5, 0, 0), radius = 0.1); color = RGB(0.0, 1, 0)),
+                 Surface(Box(-0.9..(-0.7), -0.9..(-0.7), -0.1..0.1)), Lines(pl), Lines([[SVector(0.0, -0.5, 0), SVector(0.5, -0.5, 0)]]),
+                 Lines(pl; color = [[RGB(1.0, 0, 0), RGB(0.0, 0, 1)]])]; camera = top)
+    render!(view, 32, 32)
+    @test length(entries(view, VR.Program)) == 4                      # sphere, box, constant lines, per-vertex lines
+    @test length(entries(view, VR.InstanceBuffer)) == 3
+    free!(view)
+    @test isnothing(view.cache)
+    VR.glcheck()
+end
+
+@testitem "multi-view isolation" setup = [GLContext] begin
+    import VolumeRendering as VR
+    using StaticArrays, ColorTypes, ColorSchemes, IntervalSets, AxisKeys
+    g = GridField(KeyedArray(rand(3, 6); lat = range(-1, 1; length = 3), lon = range(0, 5; length = 6)))
+    scene_a() = View([Surface(Sphere(radius = 0.6); color = Mapped(g, Colormap(ColorSchemes.viridis, 0..1))),
+                      Lines([[SVector(-1.0, 0.3, 0.7), SVector(1.0, -0.2, 0.7)]]; width_px = 3)]; camera = Camera(; radius = 1))
+    scene_b() = View([Surface(Box(-0.5..0.5, -0.5..0.5, -0.5..0.5); color = RGB(0.1, 0.8, 0.3))]; camera = GLContext.topcam(),
+                     background = RGB(0.3, 0.3, 0.3))
+    ia, ib = render_image(scene_a(), 40, 30), render_image(scene_b(), 24, 36)
+    a, b = scene_a(), scene_b()
+    for _ in 1:3
+        @test render_image(a, 40, 30) == ia
+        @test render_image(b, 24, 36) == ib
+        a.camera.fov += 1; render!(a, 40, 30); a.camera.fov -= 1     # force re-renders, interleaved
+        b.background = RGB(0.0, 0.0, 0.0); render!(b, 24, 36); b.background = RGB(0.3, 0.3, 0.3)
+    end
+    @test a.cache !== b.cache
+    free!(a)
+    @test render_image(b, 24, 36) == ib
 end
 
 @testitem "_" begin

@@ -3,13 +3,13 @@
 # ── Colormap (§4.1) ──
 
 mutable struct Colormap
-    scheme::Symbol
+    scheme::ColorScheme
     window::ClosedInterval{Float64}   # value units, also when log
     log::Bool
 
     Colormap(scheme, window, log) = validate(new(scheme, window, log))
 end
-Colormap(scheme::Symbol, window::ClosedInterval; log = false) = Colormap(scheme, window, log)
+Colormap(scheme::ColorScheme, window::ClosedInterval; log = false) = Colormap(scheme, window, log)
 
 function validate(c::Colormap)
     lo, hi = endpoints(c.window)
@@ -92,6 +92,8 @@ function validate(m::Volume)
     m.mode in (:dvr, :mip, :average) || throw(ArgumentError("Volume mode must be :dvr, :mip or :average, got $(repr(m.mode))"))
     m.mode === :dvr || kind === :mapped_field || throw(ArgumentError("Volume mode $(repr(m.mode)) requires a Mapped colour"))
     check_shape(m.region, "a Volume region")
+    m.density > 0 || throw(ArgumentError("Volume density must be positive, got $(m.density)"))
+    m.step_scale > 0 || throw(ArgumentError("Volume step_scale must be positive, got $(m.step_scale)"))
     kind === :mapped_field && check_extinction(m.extinction)
     m
 end
@@ -144,7 +146,14 @@ end
 
 View(marks::AbstractVector; camera::Camera, background = RGB(0.0, 0.0, 0.0), max_volume_px = 2048, refine_frames = 16,
      flymode = false, fly_speed = default_fly_speed(camera)) =
-    View(marks, camera, deepcopy(camera), background, max_volume_px, refine_frames, flymode, fly_speed, nothing, nothing, 0)
+    validate(View(marks, camera, deepcopy(camera), background, max_volume_px, refine_frames, flymode, fly_speed, nothing, nothing, 0))
+
+# runs at construction and at render, like the marks'
+function validate(view::View)
+    view.refine_frames >= 1 || throw(ArgumentError("View refine_frames must be ≥ 1, got $(view.refine_frames)"))
+    view.max_volume_px >= 1 || throw(ArgumentError("View max_volume_px must be ≥ 1, got $(view.max_volume_px)"))
+    view
+end
 
 default_fly_speed(cam::Camera) = (cam.projection === :ortho ? cam.ortho_half : distance(cam)) / 200
 
