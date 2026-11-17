@@ -151,51 +151,54 @@ volume_body(mode::Symbol) = let (; init, step, out) = VOLUME_MODES[mode]
     """
 end
 
-# per-vertex payload of a Lines program: GLSL type and varying name
-varying(::Vector{<:Vector{<:Color}}) = ("vec3", "vr_vrgb")
-varying(::Vector{<:Vector{<:Real}}) = ("float", "vr_vval")
+# per-vertex payload of a Lines program: its GLSL type; the endpoint values reach the fragment flat, as vr_va, vr_vb
+payload_type(::Vector{<:Vector{<:Color}}) = "vec3"
+payload_type(::Vector{<:Vector{<:Real}}) = "float"
 
 payload_attrs(::Nothing) = ""
-payload_attrs(p) = let (T, name) = varying(p)
-    "layout(location = 2) in $T vr_pa;  layout(location = 3) in $T vr_pb;\nout $T $name;\n"
+payload_attrs(p) = let T = payload_type(p)
+    "layout(location = 2) in $T vr_pa;  layout(location = 3) in $T vr_pb;\nflat out $T vr_va, vr_vb;\n"
 end
 payload_assign(::Nothing) = ""
-payload_assign(p) = "$(varying(p)[2]) = end == 0 ? vr_pa : vr_pb;"
+payload_assign(p) = "vr_va = mix(vr_pa, vr_pb, ua);  vr_vb = mix(vr_pa, vr_pb, ub);"
 
 lines_vert(payload) = """
     #version 410 core
     layout(location = 0) in vec3 vr_a;  layout(location = 1) in vec3 vr_b;
     $(payload_attrs(payload))uniform mat4 vr_viewproj; uniform vec2 vr_viewport; uniform float vr_width_px;
-    out vec3 vr_pos;  flat out vec2 vr_sa, vr_sb;
+    flat out vec2 vr_sa, vr_sb;  flat out vec4 vr_ha, vr_hb;
     void main() {
         int end = gl_VertexID >> 1; float side = (gl_VertexID & 1) == 0 ? -1.0 : 1.0;
         vec4 ca = vr_viewproj * vec4(vr_a, 1.0), cb = vr_viewproj * vec4(vr_b, 1.0);
-        vec3 wa = vr_a, wb = vr_b;
         if (ca.w <= 0.0 && cb.w <= 0.0) { gl_Position = vec4(2.0, 2.0, 0.0, 1.0); return; }   // fully behind the eye
         // eye-plane clip of one behind endpoint at a relative epsilon of the other's w (scale-free): interpolated from the
-        // front endpoint, and the clipped w set exactly — interpolating w cancels to garbage when the endpoint is far behind
-        if (ca.w <= 0.0)      { float s = (1.0 - 1e-4) * cb.w / (cb.w - ca.w); ca = vec4(cb.xyz + (ca.xyz - cb.xyz) * s, 1e-4 * cb.w); wa = wb + (wa - wb) * s; }
-        else if (cb.w <= 0.0) { float s = (1.0 - 1e-4) * ca.w / (ca.w - cb.w); cb = vec4(ca.xyz + (cb.xyz - ca.xyz) * s, 1e-4 * ca.w); wb = wa + (wb - wa) * s; }
+        // front endpoint, and the clipped w set exactly — interpolating w cancels to garbage when the endpoint is far behind.
+        // ua, ub: the drawn endpoints' parameters along the input segment, shared by the world position and the payload
+        float ua = 0.0, ub = 1.0;
+        if (ca.w <= 0.0)      { float s = (1.0 - 1e-4) * cb.w / (cb.w - ca.w); ca = vec4(cb.xyz + (ca.xyz - cb.xyz) * s, 1e-4 * cb.w); ua = 1.0 - s; }
+        else if (cb.w <= 0.0) { float s = (1.0 - 1e-4) * ca.w / (ca.w - cb.w); cb = vec4(ca.xyz + (cb.xyz - ca.xyz) * s, 1e-4 * ca.w); ub = s; }
+        vec3 wa = mix(vr_a, vr_b, ua), wb = mix(vr_a, vr_b, ub);
         vec2 sa = (ca.xy / ca.w * 0.5 + 0.5) * vr_viewport, sb = (cb.xy / cb.w * 0.5 + 0.5) * vr_viewport;   // pixel coords
         vec2 d = sb - sa; float len = length(d);
         vec2 dir = len > 1e-6 ? d / len : vec2(1.0, 0.0);          // zero-length / end-on segment: no NaN, draws a dot
         vec2 nrm = vec2(-dir.y, dir.x); float hw = 0.5 * vr_width_px;
         vec2 sp = (end == 0 ? sa - dir * hw : sb + dir * hw) + nrm * side * hw;
-        vec4 cur = end == 0 ? ca : cb;
-        gl_Position = vec4((sp / vr_viewport * 2.0 - 1.0) * cur.w, 0.0, cur.w);
-        vr_pos = end == 0 ? wa : wb;  vr_sa = sa;  vr_sb = sb;  $(payload_assign(payload))
+        gl_Position = vec4(sp / vr_viewport * 2.0 - 1.0, 0.0, 1.0);   // screen-space quad; every varying is flat
+        vr_sa = sa;  vr_sb = sb;  vr_ha = vec4(wa, 1.0) / ca.w;  vr_hb = vec4(wb, 1.0) / cb.w;  $(payload_assign(payload))
     }
     """
 
-const LINES_DECLS = "uniform float vr_width_px;\nin vec3 vr_pos;\nflat in vec2 vr_sa, vr_sb;\n"
+const LINES_DECLS = "uniform float vr_width_px;\nflat in vec2 vr_sa, vr_sb;\nflat in vec4 vr_ha, vr_hb;\n"
 
 const LINES_BODY = """
     void main() {
         vec2 q = gl_FragCoord.xy, ab = vr_sb - vr_sa; float l2 = dot(ab, ab);
         float s = l2 > 0.0 ? clamp(dot(q - vr_sa, ab) / l2, 0.0, 1.0) : 0.0;
         if (distance(q, vr_sa + s * ab) > 0.5 * vr_width_px) discard;        // capsule coverage
-        float t = vr_t(vr_pos); if (t <= 0.0) discard;
-        vr_frag = vec4(vr_color(vr_pos).rgb, 1.0);
+        // the segment point under the pixel, perspective-correct from the screen parameter (homogeneous endpoints)
+        vec4 h = mix(vr_ha, vr_hb, s); vec3 p = h.xyz / h.w;
+        float t = vr_t(p); if (t <= 0.0) discard;
+        vr_frag = vec4(vr_color(p).rgb, 1.0);
         gl_FragDepth = vr_near / t;
     }
     """
@@ -215,17 +218,24 @@ rgb32(c::Color) = (x = RGB{Float32}(c); SVector(x.r, x.g, x.b))
 source_parts(bridge; objects = [], colormap = nothing, decls = "", uniforms = (;), payload = nothing) =
     (; objects, colormap, decls, bridge, uniforms, payload)
 
-vertex_parts(payload, bridge; colormap = nothing) = let (T, name) = varying(payload)
-    source_parts(bridge; colormap, decls = "in $T $name;\n", payload)
-end
+# the payload at the fragment's segment point p, interpolated by p's parameter along the segment: the same
+# perspective-correct rule as p itself (§6.7)
+const PAYLOAD_GLSL = """
+    float vr_seg_u(vec3 p) {
+        vec3 a = vr_ha.xyz / vr_ha.w, ab = vr_hb.xyz / vr_hb.w - a; float l2 = dot(ab, ab);
+        return l2 > 0.0 ? clamp(dot(p - a, ab) / l2, 0.0, 1.0) : 0.0;
+    }
+    """
+vertex_parts(payload, bridge; colormap = nothing) =
+    source_parts(PAYLOAD_GLSL * bridge; colormap, decls = "flat in $(payload_type(payload)) vr_va, vr_vb;\n", payload)
 
 color_source(c::Color) =
     source_parts("vec4 vr_color(vec3 p) { return vec4(vr_rgb, 1.0); }\n"; decls = "uniform vec3 vr_rgb;\n", uniforms = (; vr_rgb = rgb32(c)))
-color_source(c::Vector{<:Vector{<:Color}}) = vertex_parts(c, "vec4 vr_color(vec3 p) { return vec4(vr_vrgb, 1.0); }\n")
+color_source(c::Vector{<:Vector{<:Color}}) = vertex_parts(c, "vec4 vr_color(vec3 p) { return vec4(mix(vr_va, vr_vb, vr_seg_u(p)), 1.0); }\n")
 color_source(m::Mapped) = mapped_source(m.source, m.colormap)
 color_source(f) = source_parts("vec4 vr_color(vec3 p) { return value(p); }\n"; objects = [field_part(f)])   # :color field (validated)
 
-mapped_source(vals::Vector{<:Vector{<:Real}}, colormap) = vertex_parts(vals, mapped_bridge("vr_vval"); colormap)
+mapped_source(vals::Vector{<:Vector{<:Real}}, colormap) = vertex_parts(vals, mapped_bridge("mix(vr_va, vr_vb, vr_seg_u(p))"); colormap)
 mapped_source(f, colormap) = source_parts(mapped_bridge("value(p)"); objects = [field_part(f)], colormap)
 
 # ── colormap (§4.1) ──

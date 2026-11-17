@@ -779,8 +779,8 @@ end
     srcs = map(c -> (d = asm(Lines(pl; color = c), cam, 64, 48); (d.vert, d.frag)),
                [RGB(1.0, 0, 0), [[RGB(1.0, 0, 0), RGB(0.0, 1, 0)]], Mapped([[1.0, 2.0]], cmap), Mapped(f, cmap)])
     @test allunique(srcs)
-    @test occursin("layout(location = 2) in vec3 vr_pa;", srcs[2][1]) && occursin("in vec3 vr_vrgb;", srcs[2][2])
-    @test occursin("layout(location = 2) in float vr_pa;", srcs[3][1]) && occursin("in float vr_vval;", srcs[3][2])
+    @test occursin("layout(location = 2) in vec3 vr_pa;", srcs[2][1]) && occursin("flat in vec3 vr_va, vr_vb;", srcs[2][2])
+    @test occursin("layout(location = 2) in float vr_pa;", srcs[3][1]) && occursin("flat in float vr_va, vr_vb;", srcs[3][2])
     @test !occursin("vr_pa", srcs[1][1])
 
     # error paths, all before any GL call
@@ -984,9 +984,8 @@ end
     near(a, b) = maximum(abs, a .- b) < 0.01
     cmap = Colormap(ColorSchemes.gray1, 0..1)
     pl = [[P(20, 9), P(20, 57)]]                            # x from -0.734 to 0.766, along row 20
-    # attributes interpolate over the quad, whose caps extend the 48 px segment by ½ px and carry the endpoint values
-    f = ((0:48) .+ 0.5) ./ 49
-    xs = xy(20, 9)[1] .+ f .* (xy(20, 57)[1] - xy(20, 9)[1])
+    # every attribute is taken at the true segment point under the pixel: the endpoints sit on pixel centres 9 and 57
+    f = (0:48) ./ 48
 
     # constant
     im = img(Lines(pl; color = RGB(0.2, 0.4, 0.6)))
@@ -1005,7 +1004,7 @@ end
     # Mapped(field) samples the field at the fragment's world position
     fx = GLSLField("float value(vec3 p) { return 0.5 * p.x + 0.5; } float stepSize(vec3 p) { return 1.0; }")
     im = img(Lines(pl; color = Mapped(fx, cmap)))
-    @test near(gray.(im[20, 9:57]), 0.5 .* xs .+ 0.5)
+    @test near(gray.(im[20, 9:57]), [0.5 * xy(20, c)[1] + 0.5 for c in 9:57])   # the true segment point under each pixel
 
     # :color field
     yellow_top = GLSLField("vec4 value(vec3 p) { return vec4(1.0, p.y > 0.0 ? 1.0 : 0.0, 0.0, 1.0); } float stepSize(vec3 p) { return 1.0; }";
@@ -1041,6 +1040,19 @@ end
         @test count(!=(RGB{VR.N0f8}(0, 0, 0)), ref) > 10
         @test img([a, b]) == ref
         @test img([b, a]) == ref
+    end
+
+    # payloads follow the drawn segment: per-vertex z equals the field p.z pixel for pixel, receding and eye-plane clipped
+    using ColorSchemes, IntervalSets
+    cmap = Colormap(ColorSchemes.gray1, -2.0..3.0)
+    pz = GLSLField("float value(vec3 p) { return p.z; } float stepSize(vec3 p) { return 1.0; }")
+    shade(pl, color) = render_image(View([Lines([pl]; color)]; camera = cam), 64, 64)
+    for (p, q) in ((SVector(-0.6, 0.01, -2.0), SVector(0.7, 0.01, 2.5)),     # receding, both in front
+                   (SVector(-0.5, 0.01, 0.0), SVector(4.5, 0.01, 8.0))),     # q behind the eye (z > 3)
+        pl in ([p, q], [q, p])
+        ref = shade(pl, Mapped(pz, cmap))
+        @test count(!=(RGB{VR.N0f8}(0, 0, 0)), ref) > 20
+        @test shade(pl, Mapped([getindex.(pl, 3)], cmap)) == ref
     end
 end
 
@@ -1507,6 +1519,134 @@ end
     @test (a.nsamp, b.nsamp) == (2, 3)
     @test render_image(a, 40, 30) == ia
     @test render_image(b, 24, 36) == ib
+end
+
+@testitem "helpers: graticule, on_sphere, box_edges, axis_lines" begin
+    import VolumeRendering as VR
+    using StaticArrays, LinearAlgebra, IntervalSets, ColorTypes, Unitful
+    midpoints(pl) = [(a + b) / 2 for (a, b) in zip(pl, @view pl[2:end])]
+    x, y = SVector(1.0, 0.0, 0.0), SVector(0.0, 1.0, 0.0)
+    unit = Sphere(radius = 1.0)
+
+    @test VR.parallel_lats(3) ≈ [-π/4, 0, π/4]
+    @test isempty(VR.parallel_lats(0))
+    @test VR.meridian_lons(6) ≈ [0, π/3, 2π/3, π, 4π/3, 5π/3]
+    @test isempty(VR.meridian_lons(0))
+    @test VR.parallel_lats([0.1, 0.2]) == [0.1, 0.2]                  # explicit angles pass through
+
+    # defaults: 3 rings of 65 points, 6 half-meridians of 33
+    @test length.(graticule(unit)) == [65, 65, 65, 33, 33, 33, 33, 33, 33]
+    # equator only, 8 segments: one closed ring of 9 points on z = 0, out to 1 / cos(π/8)
+    eq = only(graticule(unit; parallels = [0.0], meridians = 0, segments = 8))
+    @test length(eq) == 9
+    @test eq[1] ≈ eq[end] ≈ SVector(1.0823922002923940, 0, 0)
+    @test getindex.(eq, 3) == zeros(9)
+    @test norm.(midpoints(eq)) ≈ fill(1.0, 8)
+    # a meridian is half a circle, so it gets half the segments: pole to pole in 9 points, 22.5° steps
+    mer = only(graticule(unit; parallels = 0, meridians = [0.0], segments = 16))
+    @test length(mer) == 9
+    @test mer[1] ≈ SVector(0, 0, -1.0195911582083184) && mer[end] ≈ SVector(0, 0, 1.0195911582083184)
+    # angles only reach sin/cos: Unitful angles work with no conversion
+    @test graticule(unit; parallels = [30u"°"], meridians = [90u"°"], segments = 8) ≈
+          graticule(unit; parallels = [π/6], meridians = [π/2], segments = 8)
+
+    # a 90° step: both ends out to √2, the chord's midpoint touching the unit sphere
+    @test on_sphere([[x, y]], unit) ≈ [[SVector(√2, 0, 0), SVector(0, √2, 0)]]
+    @test on_sphere([[x, y]], unit) isa Vector{Vector{SVector{3,Float64}}}
+    # only directions count; any AbstractVector works
+    @test on_sphere([[2x, 5y]], unit) ≈ on_sphere([[[1.0, 0, 0], [0, 1.0, 0]]], unit) ≈ on_sphere([[x, y]], unit)
+    # the widest step sets the scale for all curves: its midpoint touches, the others' are outside
+    c = on_sphere([[x, y], [x, normalize(x + y)]], unit)
+    @test norm.(midpoints(c[1])) ≈ [1.0]
+    @test norm.(midpoints(c[2])) ≈ [cos(π/8) / cos(π/4)]
+    # around a centre: the equator of a radius-2 sphere at (1,0,0), in 8 steps of 45°
+    ring = only(graticule(Sphere(center = x, radius = 2.0); parallels = [0.0], meridians = 0, segments = 8))
+    @test norm.(ring .- Ref(x)) ≈ fill(2.164784400584788, 9)         # 2 / cos(π/8)
+    @test norm.(midpoints(ring) .- Ref(x)) ≈ fill(2.0, 8)
+    # a parallel's step is shorter than its longitude step: σ with cos σ = sin²φ + cos²φ·cos(45°)
+    par = only(graticule(unit; parallels = [π/6], meridians = 0, segments = 8))
+    @test norm.(par) ≈ fill(1.0598996098693099, 9)
+    @test norm.(midpoints(par)) ≈ fill(1.0, 8)
+
+    # box edges: 12 distinct axis-aligned two-point edges between corners
+    edges = box_edges(Box(0..2, 0..4, 6..12))
+    @test edges isa Vector{Vector{SVector{3,Float64}}} && all(==(2) ∘ length, edges)
+    @test sort([norm(b - a) for (a, b) in edges]) == [2, 2, 2, 2, 4, 4, 4, 4, 6, 6, 6, 6]
+    @test all(((a, b),) -> count(a .!= b) == 1, edges) && allunique(Set.(edges))
+    @test all(p -> p[1] ∈ (0, 2) && p[2] ∈ (0, 4) && p[3] ∈ (6, 12), reduce(vcat, edges))
+
+    ax = axis_lines(SVector(1.0, 2.0, 3.0), 0.5)
+    @test ax.polylines == [[SVector(0.5, 2, 3), SVector(1.5, 2, 3)], [SVector(1, 1.5, 3), SVector(1, 2.5, 3)],
+                           [SVector(1, 2, 2.5), SVector(1, 2, 3.5)]]
+    @test ax.colors == [fill(RGB(1.0, 0, 0), 2), fill(RGB(0.0, 1, 0), 2), fill(RGB(0.0, 0, 1), 2)]
+    @test Lines(ax.polylines; color = ax.colors).color === ax.colors
+end
+
+@testitem "helpers: streamlines, glyphs" begin
+    using StaticArrays, LinearAlgebra, IntervalSets, ColorSchemes
+    # UniformStreamlines' NaN-separated paths: one-point pieces kept, empty pieces (leading/trailing/repeated NaN) dropped
+    P(x) = SVector(x, 0.0, 0.0)
+    @test VolumeRendering.split_at_nan(P.([NaN, 1, 2, NaN, NaN, 3, NaN, 4, 5, 6, NaN])) == [P.([1, 2]), [P(3)], P.([4, 5, 6])]
+    @test VolumeRendering.split_at_nan(P.([1, 2])) == [P.([1, 2])]
+    calls = Ref(0)
+    swirl(p) = (calls[] += 1; SVector(-p[2], p[1], 0.2))     # circles about z, rising: |V| = hypot(x, y, 0.2)
+    vf = VectorField(swirl; region = Box(-1..1, -1..1, -0.5..0.5))
+    @test vf.region == Box(-1..1, -1..1, -0.5..0.5)
+    s = streamlines(vf)
+    @test s isa Streamlines && length(s.polylines) > 10
+    @test length.(s.values) == length.(s.polylines) && all(>(1), length.(s.polylines))
+    @test all(l -> all(p -> all(abs.(p) .<= (1, 1, 0.5) .+ 1e-9), l), s.polylines)
+    @test reduce(vcat, s.values) ≈ [hypot(p[1], p[2], 0.2) for l in s.polylines for p in l]
+    # integrated along the field: each streamline keeps its distance from the z axis
+    @test all(l -> -(reverse(extrema(p -> hypot(p[1], p[2]), l))...) < 1e-3, s.polylines)
+    @test Lines(s.polylines; color = Mapped(s.values, Colormap(ColorSchemes.viridis, 0.1..2))) isa Lines
+
+    vertices = Set(reduce(vcat, s.polylines))
+    for every in (12, 5)
+        n0 = calls[]
+        g = glyphs(s; every)
+        narrows = length(g.polylines) ÷ 2
+        @test calls[] - n0 == narrows                                 # one speed per arrow, no re-integration
+        @test narrows > 10 && length.(g.polylines) == repeat([3, 2], narrows) && length.(g.values) == length.(g.polylines)
+        shafts, heads = g.polylines[1:2:end], g.polylines[2:2:end]
+        bases, tips = first.(shafts), getindex.(shafts, 2)
+        @test bases ⊆ vertices && first.(heads) == tips
+        @test norm.(tips .- bases) ≈ fill(1, narrows)                 # UniformStreamlines' unit arrow (scale 1)
+        @test norm.(last.(shafts) .- tips) ≈ norm.(last.(heads) .- tips) ≈ fill(0.35 * √2, narrows)   # head strokes at 45°, headfrac 0.35
+        @test g.values ≈ [fill(hypot(b[1], b[2], 0.2), n) for b in bases for n in (3, 2)]
+    end
+end
+
+@testitem "helper lines render" setup = [GLContext] begin
+    using StaticArrays, ColorTypes, FixedPointNumbers, ColorSchemes, IntervalSets
+    green = RGB{N0f8}(0, 1, 0)
+    sphere = Sphere(radius = 1.0)
+    # face-on curves on a sphere, alone vs listed after an opaque sphere of their radius: no pixel may be lost.
+    # Seen from +x, screen-right is +y; the half-pixel shift puts the vertical curve on a pixel-column centre.
+    side = Camera(SVector(3.0, -0.65 / 128, 0), SVector(0.0, -0.65 / 128, 0), SVector(0.0, 0, 1), :ortho, 90.0, 1.3)
+    lost(lines) = let alone = render_image(View([lines]; camera = side), 128, 128) .== green
+        (count(alone), count(alone .& .!(render_image(View([Surface(sphere), lines]; camera = side), 128, 128) .== green)))
+    end
+    meridian = Lines(graticule(sphere; parallels = 0, meridians = [0.0], segments = 16); color = RGB(0.0, 1, 0))
+    arc = Lines(on_sphere([[SVector(cos(a), 0, sin(a)) for a in -1.2:0.3:1.2]], sphere); color = RGB(0.0, 1, 0))
+    @test first(lost(meridian)) ∈ 100:104                    # one column, 2 / cos(π/16) of the 1 / 1.3 half-height
+    @test last(lost(meridian)) == 0                          # chord midpoints tie with the sphere: list order keeps them
+    @test first(lost(arc)) > 80
+    @test last(lost(arc)) == 0
+
+    # streamlines coloured by |V|, and their glyphs
+    vf = VectorField(p -> SVector(-p[2], p[1], 0.2); region = Box(-1..1, -1..1, -1..1))
+    s = streamlines(vf)
+    cmap = Colormap(ColorSchemes.viridis, 0.2..1.5)
+    img = render_image(View([Lines(s.polylines; color = Mapped(s.values, cmap))]; camera = GLContext.topcam(1.2)), 128, 128)
+    lit = findall(!=(RGB{N0f8}(0, 0, 0)), img)
+    ρ = map(I -> hypot(GLContext.pixel_xy(1.2, 128, Tuple(I)...)...), lit)    # seen from +z, |V| = hypot(ρ, 0.2)
+    @test length(lit) > 2000 && all(abs.(extrema(ρ) .- (0.15, 1.25)) .< 0.05)
+    expected = get.(Ref(ColorSchemes.viridis), clamp.((hypot.(ρ, 0.2) .- 0.2) ./ 1.3, 0, 1))
+    @test maximum(((c, e),) -> maximum(abs, (c.r - e.r, c.g - e.g, c.b - e.b)), zip(img[lit], expected)) < 0.03
+    g = glyphs(s)
+    img = render_image(View([Lines(g.polylines; color = Mapped(g.values, cmap))]; camera = GLContext.topcam(1.2)), 128, 128)
+    @test count(!=(RGB{N0f8}(0, 0, 0)), img) > 500
 end
 
 @testitem "_" begin
