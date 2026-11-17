@@ -1,312 +1,308 @@
-# NOTE: this suite uses a single shared GLFW/OpenGL context for all render checks (rather than the
-# usual per-@testitem isolation) — every test needs a live GL context, and one shared hidden context
-# is both faster and avoids multiple concurrent contexts. All GL work happens inside `withctx`.
+using TestItemRunner
+@run_package_tests
 
-using Test
-using VolumeRendering, AxisKeys, StaticArrays
-using ColorTypes, FixedPointNumbers, Unitful
-using LinearAlgebra: norm, normalize
-import GLFW, ModernGL as GL
 
-# ── headless GL context + pixel readback helpers ──
-function withctx(f; w = 64, h = 64)
-    GLFW.Init()
-    GLFW.WindowHint(GLFW.VISIBLE, false)
-    GLFW.WindowHint(GLFW.CONTEXT_VERSION_MAJOR, 4); GLFW.WindowHint(GLFW.CONTEXT_VERSION_MINOR, 1)
-    GLFW.WindowHint(GLFW.OPENGL_PROFILE, GLFW.OPENGL_CORE_PROFILE)
-    GLFW.WindowHint(GLFW.OPENGL_FORWARD_COMPAT, true)
-    win = GLFW.CreateWindow(w, h, "VolumeRendering tests"); GLFW.MakeContextCurrent(win)
-    try f() finally GLFW.DestroyWindow(win); GLFW.Terminate() end
-end
-function renderbuf(view, w)
-    tex = render!(view, w, w)
-    GL.glBindFramebuffer(GL.GL_FRAMEBUFFER, view.vr.geom_fb.fbo)
-    buf = Array{UInt8}(undef, 4, w, w)
-    GL.glReadPixels(0, 0, w, w, GL.GL_RGBA, GL.GL_UNSIGNED_BYTE, buf); GL.glFinish()
-    (tex, buf)
-end
-# Geometry depth only (the composite pass leaves it untouched), so overlay coverage can be checked
-# without the volume's contribution mixed in. 1 == nothing drawn.
-function depthbuf(view, w)
-    render!(view, w, w)
-    GL.glBindFramebuffer(GL.GL_FRAMEBUFFER, view.vr.geom_fb.fbo)
-    buf = Array{Float32}(undef, w, w)
-    GL.glReadPixels(0, 0, w, w, GL.GL_DEPTH_COMPONENT, GL.GL_FLOAT, buf); GL.glFinish()
-    buf
-end
-litfrac(b) = count(>(4), @view b[1:3, :, :]) / (3 * size(b, 2) * size(b, 3))
+@testmodule GLContext begin
+    import GLFW, ModernGL as GL
+    import VolumeRendering as VR
 
-const W = 256
-gaussian(xs, ys, zs; c = (0.0, 0.0, 0.0), s = 0.2) =
-    Float64[exp(-((x-c[1])^2 + (y-c[2])^2 + (z-c[3])^2) / s) for x in xs, y in ys, z in zs]
-
-# a custom (non-AbstractRange) uniform axis, to exercise the axis_index_glsl extension seam
-struct UniformAxis <: AbstractVector{Float64}; a::Float64; d::Float64; n::Int; end
-Base.size(k::UniformAxis) = (k.n,)
-Base.getindex(k::UniformAxis, i::Int) = k.a + k.d * (i - 1)
-VolumeRendering.axis_index_glsl(k::UniformAxis, c) = "((" * c * ") - " * repr(k.a) * ") * " * repr(inv(k.d))
-
-@testset "VolumeRendering" begin
-    @testset "construction needs no GL context" begin
-        xs = ys = zs = -1.0:0.5:1.0
-        @test FieldView(KeyedArray(gaussian(xs, ys, zs); x = xs, y = ys, z = zs)).tf.tex == 0
-        @test FieldView(nothing; region = SphereRegion(radius = 1.0), overlays = [SphereOverlay(radius = 0.5)]).tf.tex == 0
+    # one hidden 4.1 core context per process, current for every GL test item, never destroyed before exit
+    const window = let
+        GLFW.WindowHint(GLFW.VISIBLE, false)
+        GLFW.WindowHint(GLFW.CONTEXT_VERSION_MAJOR, 4); GLFW.WindowHint(GLFW.CONTEXT_VERSION_MINOR, 1)
+        GLFW.WindowHint(GLFW.OPENGL_PROFILE, GLFW.OPENGL_CORE_PROFILE)
+        GLFW.WindowHint(GLFW.OPENGL_FORWARD_COMPAT, true)
+        w = GLFW.CreateWindow(64, 64, "VolumeRendering tests")
+        GLFW.MakeContextCurrent(w)
+        w
     end
 
-    withctx() do
-        xs = ys = zs = -1.0:0.05:1.0
+    const FULLSCREEN_VERT = """
+        #version 410 core
+        void main() { gl_Position = vec4(vec2(gl_VertexID == 1 ? 3.0 : -1.0, gl_VertexID == 2 ? 3.0 : -1.0), 0.0, 1.0); }
+        """
+    const empty_vao = VR.gen(GL.glGenVertexArrays)
 
-        @testset "KeyedArray volume renders" begin
-            v = FieldView(KeyedArray(gaussian(xs, ys, zs); x = xs, y = ys, z = zs))
-            _, b = renderbuf(v, W)
-            @test GL.glGetError() == 0
-            @test litfrac(b) > 0.02
-        end
-
-        @testset "coordinate mapping (x>0 field → image right)" begin
-            step = Float64[x > 0 ? 1.0 : 0.0 for x in xs, y in ys, z in zs]
-            v = FieldView(KeyedArray(step; x = xs, y = ys, z = zs))
-            v.params.mode = 1                                   # MIP
-            v.camera.projection = :ortho
-            v.camera.eye = SVector(0.0, 0.0, 3.0); v.camera.lookat = SVector(0.0, 0.0, 0.0)
-            v.camera.up = SVector(0.0, 1.0, 0.0); v.camera.ortho_half = 1.2
-            _, b = renderbuf(v, W)
-            lum = sum(Int.(b[1:3, :, :]); dims = 1)[1, :, :]
-            left = sum(@view lum[1:W÷2, :]); right = sum(@view lum[W÷2+1:W, :])
-            @test right > 3 * max(left, 1)                      # +x maps to camera-right
-        end
-
-        @testset "RGBA color field: intrinsic color + placement" begin
-            # red where x>0, green where x<0; the field carries its own color (no colormap).
-            grid = [RGBA{N0f8}(x > 0 ? 1.0 : 0.0, x > 0 ? 0.0 : 1.0, 0.0, 0.5) for x in xs, y in ys, z in zs]
-            A = KeyedArray(grid; x = xs, y = ys, z = zs)
-            @test uses_transfer_function(A) == false
-            v = FieldView(A)
-            v.camera.projection = :ortho
-            v.camera.eye = SVector(0.0, 0.0, 3.0); v.camera.lookat = SVector(0.0, 0.0, 0.0)
-            v.camera.up = SVector(0.0, 1.0, 0.0); v.camera.ortho_half = 1.2
-            _, b = renderbuf(v, W)
-            @test GL.glGetError() == 0
-            @test litfrac(b) > 0.02
-            R, G = Int.(b[1, :, :]), Int.(b[2, :, :])
-            rR, rG = sum(@view R[W÷2+1:W, :]), sum(@view G[W÷2+1:W, :])   # +x half (camera-right)
-            lR, lG = sum(@view R[1:W÷2, :]),   sum(@view G[1:W÷2, :])     # -x half
-            @test rR > 3 * max(rG, 1)     # right half is red
-            @test lG > 3 * max(lR, 1)     # left half is green
-        end
-
-        @testset "GLSLField (analytic) + SphereRegion" begin
-            f = GLSLField("""
-                float sampleField(vec3 p){ return exp(-dot(p,p)*0.7); }
-                float stepSize(vec3 p){ return 0.05; }""";
-                region = SphereRegion(radius = 3.0), value_range = (0.0, 1.0))
-            _, b = renderbuf(FieldView(f), W)
-            @test GL.glGetError() == 0
-            @test litfrac(b) > 0.02
-        end
-
-        @testset "custom axis type == equivalent range axis (pixel-identical)" begin
-            blob = gaussian(xs, ys, zs)
-            _, bref = renderbuf(FieldView(KeyedArray(blob; x = xs, y = ys, z = zs)), W)
-            ax = UniformAxis(-1.0, 0.05, length(xs))
-            _, bcus = renderbuf(FieldView(KeyedArray(blob; x = ax, y = ys, z = zs)), W)
-            @test bref == bcus
-        end
-
-        @testset "all overlays render without GL error" begin
-            A = KeyedArray(gaussian(xs, ys, zs); x = xs, y = ys, z = zs)
-            vf = VectorField(p -> SVector(-p[2], p[1], 0.2); region = BoxRegion((-1.,-1.,-1.), (1.,1.,1.)))
-            ovs = Overlay[SliceOverlay(:z), BoxOutlineOverlay(), SphereOverlay(radius = 0.4),
-                          SphereOutlineOverlay(region = SphereRegion(radius = 0.6)),
-                          SurfaceSliceOverlay(SphereRegion(radius = 0.4)),
-                          SpherePolylinesOverlay([[SVector(1.0, 0.0, 0.0), SVector(0.0, 1.0, 0.0)]];
-                                                 region = SphereRegion(radius = 0.6)),
-                          AxesOverlay(), StreamlinesOverlay(vf), GlyphsOverlay(vf; every = 8)]
-            _, b = renderbuf(FieldView(A; overlays = ovs), W)
-            @test GL.glGetError() == 0
-            @test litfrac(b) > 0.05
-        end
-
-        @testset "surface slice" begin
-            A = KeyedArray(gaussian(xs, ys, zs); x = xs, y = ys, z = zs)
-            topdown!(v) = (v.camera.projection = :ortho;
-                           v.camera.eye = SVector(0.0, 0.0, 3.0); v.camera.lookat = SVector(0.0, 0.0, 0.0);
-                           v.camera.up = SVector(0.0, 1.0, 0.0); v.camera.ortho_half = 1.2; v)
-
-            # Face-on from +z, the box's near boundary IS the plane z = 1, so the two slice overlays
-            # must agree pixel for pixel.
-            _, bplane = renderbuf(topdown!(FieldView(A; overlays = [SliceOverlay(:z; pos = 1.0)])), W)
-            _, bsurf = renderbuf(topdown!(FieldView(A;
-                overlays = [SurfaceSliceOverlay(BoxRegion((-1., -1., -1.), (1., 1., 1.)))])), W)
-            @test bsurf == bplane
-
-            # Silhouette seen from outside: the same pixels as sphere.frag's independent root solve.
-            c = SVector(0.1, 0.0, 0.0)
-            dsurf = depthbuf(FieldView(A; overlays = [SurfaceSliceOverlay(SphereRegion(; center = c, radius = 0.5))]), W)
-            dimp = depthbuf(FieldView(A; overlays = [SphereOverlay(; center = c, radius = 0.5)]), W)
-            @test (dsurf .< 1) == (dimp .< 1)
-            @test any(<(1), dsurf) && !all(<(1), dsurf)      # a silhouette, so the above isn't vacuous
-
-            # Eye inside → the far surface, wrapping the whole view. Only works while intersectRegion
-            # keeps tnear's sign.
-            v = FieldView(A; overlays = [SurfaceSliceOverlay(SphereRegion(radius = 0.5))])
-            v.camera.eye = SVector(0.1, 0.0, 0.0); v.camera.lookat = SVector(0.0, 0.0, 0.0)
-            @test all(<(1), depthbuf(v, W))
-        end
-
-        @testset "sphere outline graticule" begin
-            @test VolumeRendering._parallel_lats(3) ≈ [-π/4, 0, π/4]
-            @test isempty(VolumeRendering._parallel_lats(0))
-            @test VolumeRendering._meridian_lons(6) ≈ [0, π/3, 2π/3, π, 4π/3, 5π/3]
-            @test isempty(VolumeRendering._meridian_lons(0))
-            @test VolumeRendering._parallel_lats([0.1, 0.2]) == [0.1, 0.2]     # explicit angles pass through
-
-            # equator only, 8 segments ⇒ one closed ring of 9 directions on z = 0
-            (eq,) = VolumeRendering._graticule([0.0], 0, 8)
-            @test length(eq) == 9
-            @test eq[1] ≈ eq[end] ≈ SVector(1.0, 0.0, 0.0)
-            @test getindex.(eq, 3) == zeros(9)
-
-            # a meridian is half a circle, so it gets half the segments: pole to pole in 9 points
-            (mer,) = VolumeRendering._graticule(0, [0.0], 16)
-            @test length(mer) == 9
-            @test mer[1] ≈ SVector(0.0, 0.0, -1.0) && mer[end] ≈ SVector(0.0, 0.0, 1.0)
-
-            # angles only ever reach sin/cos, so Unitful angles work with no conversion
-            @test VolumeRendering._graticule([30u"°"], 0, 8) ≈ VolumeRendering._graticule([π/6], 0, 8)
-        end
-
-        @testset "curves circumscribing a sphere" begin
-            midpoints(pl) = [(a + b) / 2 for (a, b) in zip(pl, @view pl[2:end])]
-            x, y, o = SVector(1.0, 0.0, 0.0), SVector(0.0, 1.0, 0.0), SVector(0.0, 0.0, 0.0)
-
-            # a 90° step: both ends out to √2, the chord's midpoint touching the unit sphere
-            @test VolumeRendering._circumscribed(o, 1.0, [[x, y]]) ≈ [[SVector(√2, 0, 0), SVector(0, √2, 0)]]
-            # only directions count
-            @test VolumeRendering._circumscribed(o, 1.0, [[2x, 5y]]) ≈ VolumeRendering._circumscribed(o, 1.0, [[x, y]])
-
-            # the widest step sets the scale for all curves: its midpoint touches, the others' are outside
-            c = VolumeRendering._circumscribed(o, 1.0, [[x, y], [x, normalize(x + y)]])
-            @test norm.(midpoints(c[1])) ≈ [1.0]
-            @test norm.(midpoints(c[2])) ≈ [cos(π/8) / cos(π/4)]
-
-            # around a center: the equator of a radius-2 sphere at (1,0,0), in 8 steps of 45°
-            ring = only(VolumeRendering._circumscribed(x, 2.0, VolumeRendering._graticule([0.0], 0, 8)))
-            @test norm.(ring .- Ref(x)) ≈ fill(2.164784400584788, 9)         # 2 / cos(π/8)
-            @test norm.(midpoints(ring) .- Ref(x)) ≈ fill(2.0, 8)
-
-            # a parallel's step is shorter than its longitude step: σ with cos σ = sin²φ + cos²φ·cos(45°)
-            par = only(VolumeRendering._circumscribed(o, 1.0, VolumeRendering._graticule([π/6], 0, 8)))
-            @test norm.(par) ≈ fill(1.0598996098693099, 9)
-            @test norm.(midpoints(par)) ≈ fill(1.0, 8)
-        end
-
-        @testset "sphere outline stays visible on a sphere of the same radius" begin
-            # the meridian facing the camera, alone vs drawn on its sphere: not a pixel of it may be hidden
-            # (with chords inside the sphere, their middles would be)
-            outline = SphereOutlineOverlay(region = SphereRegion(radius = 1.0), parallels = 0, meridians = [0.0],
-                                           segments = 16, color = RGB(0.0, 1.0, 0.0))
-            # seen from +x, screen-right is +y; shifting the camera by half a pixel (1.3/256) puts the
-            # vertical meridian on the center of a pixel column
-            view(ovs) = (v = FieldView(nothing; region = SphereRegion(radius = 1.2), overlays = ovs);
-                         v.camera.projection = :ortho; v.camera.eye = SVector(3.0, -0.005078125, 0.0);
-                         v.camera.lookat = SVector(0.0, -0.005078125, 0.0); v.camera.ortho_half = 1.3; v)
-            green(b) = count(@views (b[2, :, :] .== 255) .& (b[1, :, :] .== 0))
-            alone = green(renderbuf(view([outline]), W)[2])
-            @test alone ∈ 200:202      # one column, 2·1.0196/2.6 of the height: 2 / cos(π/16) tall
-            @test green(renderbuf(view([SphereOverlay(radius = 1.0, color = RGB(0.2, 0.2, 0.2)), outline]), W)[2]) == alone
-        end
-
-        @testset "box outline: 12 axis-aligned edges" begin
-            edges = VolumeRendering._boxoutline_polylines(SVector(0.0, 0.0, 0.0), SVector(2.0, 4.0, 6.0))
-            @test all(==(2) ∘ length, edges)
-            @test sort([norm(b - a) for (a, b) in edges]) == [2, 2, 2, 2, 4, 4, 4, 4, 6, 6, 6, 6]
-        end
-
-        @testset "polylines" begin
-            # consecutive point pairs, each vertex (x,y,z, r,g,b); single points draw nothing
-            @test VolumeRendering._polylines_verts(
-                    [[SVector(0.0, 0.0, 0.0), SVector(1.0, 0.0, 0.0), SVector(1.0, 2.0, 0.0)], [SVector(5.0, 5.0, 5.0)]],
-                    RGB(1.0, 0.5, 0.0)) ==
-                  Float32[0, 0, 0, 1, 0.5, 0,  1, 0, 0, 1, 0.5, 0,
-                          1, 0, 0, 1, 0.5, 0,  1, 2, 0, 1, 0.5, 0]
-
-            # a horizontal line across x ∈ [-1, 1], seen face-on: 1 px tall at its row, spanning 2/2.4 of
-            # the width. y = 1.2·(160.5/128 - 1) is the center of pixel row 160 (0-based).
-            o = PolylinesOverlay([[SVector(-1.0, 0.3046875, 0.0), SVector(0.0, 0.3046875, 0.0), SVector(1.0, 0.3046875, 0.0)]])
-            v = FieldView(nothing; region = SphereRegion(radius = 1.0), overlays = [o])
-            v.camera.projection = :ortho
-            v.camera.eye = SVector(0.0, 0.0, 3.0); v.camera.lookat = SVector(0.0, 0.0, 0.0)
-            v.camera.up = SVector(0.0, 1.0, 0.0); v.camera.ortho_half = 1.2
-            litrows(d) = unique(getindex.(findall(<(1), d), 2))
-            d = depthbuf(v, W)
-            @test litrows(d) == [161]
-            @test count(<(1), d) ∈ 212:214
-
-            # an in-place edit is seen too: the line moves to the center of row 96
-            o.polylines[1] .= [SVector(-1.0, -0.2953125, 0.0), SVector(0.0, -0.2953125, 0.0), SVector(1.0, -0.2953125, 0.0)]
-            @test litrows(depthbuf(v, W)) == [97]
-        end
-
-        @testset "no volume: overlays alone" begin
-            v = FieldView(nothing; region = SphereRegion(radius = 1.0),
-                          overlays = [SphereOverlay(radius = 0.5, color = RGB(1.0, 0.0, 0.0))])
-            v.camera.projection = :ortho
-            v.camera.eye = SVector(0.0, 0.0, 3.0); v.camera.lookat = SVector(0.0, 0.0, 0.0)
-            v.camera.up = SVector(0.0, 1.0, 0.0); v.camera.ortho_half = 1.2
-            tex, b = renderbuf(v, W)
-            @test GL.glGetError() == 0
-            @test b[:, W÷2, W÷2] == [255, 0, 0, 255]               # the sphere, uncomposited
-            @test b[:, 1, 1] == [0, 0, 0, 255]                     # background
-            @test count(>(0), @view b[1, :, :]) / W^2 ≈ π * 0.5^2 / 2.4^2  rtol = 0.02
-            @test render!(v, W, W) == tex && v.vr.nsamp == 1       # unchanged ⇒ cached, no refinement frames
-
-            # a field switched in and out: the volume appears, then the overlay-only image returns exactly
-            v.field = KeyedArray(gaussian(xs, ys, zs); x = xs, y = ys, z = zs)
-            _, bvol = renderbuf(v, W)
-            @test litfrac(bvol) > litfrac(b) + 0.02
-            v.field = nothing
-            @test renderbuf(v, W)[2] == b
-        end
-
-        @testset "overlay fingerprint tracks state, not GL resources" begin
-            o = BoxOutlineOverlay(color = RGB(1.0, 0.0, 0.0))
-            fp = VolumeRendering.overlay_fingerprint(o)
-            o.gl.key = (1, 2, 3)                                  # GL cache: not part of the image
-            @test VolumeRendering.overlay_fingerprint(o) == fp
-            o.color = RGB(0.0, 1.0, 0.0)
-            @test VolumeRendering.overlay_fingerprint(o) != fp
-        end
-
-        @testset "field switch re-uploads (same-shape, different data)" begin
-            # A1/A2 have identical shape+axes → identical field_glsl → the volume program is NOT
-            # rebuilt on switch; the texture MUST still be re-uploaded so the image reflects A2.
-            A1 = KeyedArray(gaussian(xs, ys, zs; c = (-0.5, 0.0, 0.0), s = 0.1); x = xs, y = ys, z = zs)
-            A2 = KeyedArray(gaussian(xs, ys, zs; c = ( 0.5, 0.0, 0.0), s = 0.1); x = xs, y = ys, z = zs)
-            @test field_glsl(A1) == field_glsl(A2)     # same GLSL: only the data differs
-            v = FieldView(A1); (_, b1) = renderbuf(v, W)
-            v.field = A2;      (_, b2) = renderbuf(v, W)
-            @test b1 != b2                             # image reflects the new data (no stale texture)
-        end
-
-        @testset "multi-view isolation (two views, one context)" begin
-            A  = KeyedArray(gaussian(xs, ys, zs); x = xs, y = ys, z = zs)
-            A2 = KeyedArray(gaussian(xs, ys, zs; c = (0.5, 0.0, 0.0), s = 0.1); x = xs, y = ys, z = zs)
-            va = FieldView(A); vb = FieldView(A2)
-            _, ba = renderbuf(va, W)
-            renderbuf(vb, W)                                    # render B in between
-            va.last_key[] = nothing                             # force A to re-render (same inputs)
-            _, ba2 = renderbuf(va, W)
-            @test ba == ba2                                     # B did not corrupt A
-            @test va.vr.geom_fb.tex != vb.vr.geom_fb.tex        # separate GL resources
-        end
+    # draw `count` vertices (× `instances`) with `prog` into `fb`; `setup()` runs with the program current
+    function draw(setup, prog, fb; count = 3, instances = nothing, vao = empty_vao, mode = GL.GL_TRIANGLES)
+        GL.glBindFramebuffer(GL.GL_FRAMEBUFFER, fb.fbo)
+        GL.glViewport(0, 0, fb.color.size...)
+        GL.glDisable(GL.GL_DEPTH_TEST); GL.glDisable(GL.GL_BLEND)
+        GL.glClearColor(0, 0, 0, 0); GL.glClear(GL.GL_COLOR_BUFFER_BIT)
+        GL.glUseProgram(prog.id)
+        GL.glBindVertexArray(vao)
+        setup()
+        isnothing(instances) ? GL.glDrawArrays(mode, 0, count) : GL.glDrawArraysInstanced(mode, 0, count, instances)
+        GL.glBindVertexArray(0); GL.glUseProgram(0)
+        VR.glcheck()
     end
 end
 
-import Aqua
-import CompatHelperLocal as CHL
-@testset "_" begin
-    Aqua.test_all(VolumeRendering; ambiguities=false)
+
+@testitem "Identity" begin
+    import VolumeRendering as VR
+    A = [1.0, 2.0]
+    @test VR.Identity(A) == VR.Identity(A)
+    @test isequal(VR.Identity(A), VR.Identity(A))
+    @test hash(VR.Identity(A)) == hash(VR.Identity(A))
+    @test VR.Identity(A) != VR.Identity(copy(A))
+    @test length(Dict(VR.Identity(A) => 1, VR.Identity(A) => 2, VR.Identity(copy(A)) => 3)) == 2
+end
+
+@testitem "program link" setup = [GLContext] begin
+    import ModernGL as GL, VolumeRendering as VR
+    frag = """
+        #version 410 core
+        uniform sampler2D a; uniform sampler1D b; uniform float k; uniform float unused;
+        out vec4 frag;
+        void main() { frag = vec4(texture(a, vec2(0.5)).r + texture(b, 0.5).r + k); }
+        """
+    GL.glUseProgram(0)
+    p = VR.Program(GLContext.FULLSCREEN_VERT, frag, [:k, :unused], [:b, :a])
+    VR.glcheck()
+    current = Ref{GL.GLint}(-1); GL.glGetIntegerv(GL.GL_CURRENT_PROGRAM, current)
+    @test current[] == 0                       # linking leaves the current program alone
+    @test p.locations[:k] >= 0
+    @test p.locations[:unused] == -1           # dropped by the linker
+    unit(n) = (r = Ref{GL.GLint}(-1); GL.glGetUniformiv(p.id, p.locations[n], r); r[])
+    @test (unit(:b), unit(:a)) == (0, 1)       # declaration order of `samplers`
+    @test_throws "shader compilation failed" VR.Program(GLContext.FULLSCREEN_VERT, "#version 410 core\nvoid main() { x; }", Symbol[], Symbol[])
+    @test_throws "program link failed" VR.Program(GLContext.FULLSCREEN_VERT, "#version 410 core\nvoid f();\nvoid main() { f(); }", Symbol[], Symbol[])
+    VR.glcheck()
+    VR.gl_delete(p)
+end
+
+@testitem "texture upload → readback" setup = [GLContext] begin
+    import ModernGL as GL, VolumeRendering as VR
+    using ColorTypes, FixedPointNumbers
+    # hostile host unpack/pack state: uploads and readback must set their own
+    GL.glPixelStorei(GL.GL_UNPACK_ALIGNMENT, 8); GL.glPixelStorei(GL.GL_UNPACK_ROW_LENGTH, 2)
+    GL.glPixelStorei(GL.GL_PACK_ALIGNMENT, 8); GL.glPixelStorei(GL.GL_PACK_SKIP_PIXELS, 1)
+    internal(t) = (r = Ref{GL.GLint}(0); GL.glBindTexture(VR.gl_target(t), t.id);
+                   GL.glGetTexLevelParameteriv(VR.gl_target(t), 0, GL.GL_TEXTURE_INTERNAL_FORMAT, r); r[])
+    sizes = [(5,), (3, 5), (3, 5, 7)]
+    cases = [   # input eltype, internal format, texel type
+        (Float32,       GL.GL_R32F,    Float32),
+        (Float64,       GL.GL_R32F,    Float32),
+        (Int,           GL.GL_R32F,    Float32),
+        (RGBA{N0f8},    GL.GL_RGBA8,   RGBA{N0f8}),
+        (RGB{N0f8},     GL.GL_RGBA8,   RGBA{N0f8}),
+        (RGBA{Float32}, GL.GL_RGBA32F, RGBA{Float32}),
+        (RGB{Float64},  GL.GL_RGBA32F, RGBA{Float32}),
+    ]
+    rnd(::Type{T}, sz) where {T<:Real} = T <: Integer ? rand(-100:100, sz) : T.(randn(sz))
+    rnd(::Type{C}, sz) where {C<:Colorant} = map(_ -> C(ntuple(_ -> rand(eltype(C)), length(C))...), CartesianIndices(sz))
+    for sz in sizes, (T, fmt, TT) in cases
+        A = rnd(T, sz)
+        t = VR.upload(A)
+        VR.glcheck()
+        @test t isa VR.GLTexture{TT,length(sz)}
+        @test t.size == sz
+        @test internal(t) == fmt
+        B = VR.read_texture(t)
+        VR.glcheck()
+        @test B isa Array{TT,length(sz)}
+        @test B == TT.(A)
+        VR.gl_delete(t)
+    end
+    # a texture already in its texel type is uploaded without a conversion copy
+    A = rand(Float32, 4, 4)
+    @test VR.texel_array(A) === A
+    # non-Array inputs are materialized in their own index order
+    C = rand(RGBA{N0f8}, 4, 5, 6)
+    for X in (view(A, 2:3, :), PermutedDimsArray(A, (2, 1)), view(C, :, 2:4, 1:2:5), PermutedDimsArray(C, (3, 1, 2)))
+        t = VR.upload(X)
+        @test VR.read_texture(t) == X
+        VR.gl_delete(t)
+    end
+    VR.glcheck()
+    GL.glPixelStorei(GL.GL_UNPACK_ALIGNMENT, 4); GL.glPixelStorei(GL.GL_UNPACK_ROW_LENGTH, 0)
+    GL.glPixelStorei(GL.GL_PACK_ALIGNMENT, 4); GL.glPixelStorei(GL.GL_PACK_SKIP_PIXELS, 0)
+end
+
+@testitem "sampler filter and wrap" setup = [GLContext] begin
+    import ModernGL as GL, VolumeRendering as VR
+    using ColorTypes
+    # each of the 4 output pixels samples the texture at coords[i]; R channel = sampled value
+    sampled(frag_body, tex, sampler, coords) = begin
+        frag = """
+            #version 410 core
+            $frag_body
+            out vec4 frag;
+            void main() { frag = vec4(sample_at(int(gl_FragCoord.x)), 0.0, 0.0, 1.0); }
+            """
+        p = VR.Program(GLContext.FULLSCREEN_VERT, frag, [:coords], [:tex])
+        fb = VR.float_framebuffer(4, 1)
+        GLContext.draw(p, fb) do
+            VR.bind_texture(0, tex, sampler)
+            GL.glUniform3fv(p.locations[:coords], 4, Float32.(reduce(vcat, coords)))
+        end
+        out = map(c -> c.r, vec(VR.read_texture(fb.color)))
+        VR.gl_delete(p); VR.gl_delete(fb)
+        out
+    end
+
+    # 1-D [0, 1]: texel centres at u = 0.25 and 0.75
+    tex1 = VR.upload([0.0, 1.0])
+    body1 = "uniform sampler1D tex; uniform vec3 coords[4]; float sample_at(int i) { return texture(tex, coords[i].x).r; }"
+    coords1 = [[0.45, 0, 0], [1.0, 0, 0], [1.6, 0, 0], [-0.3, 0, 0]]
+    for (wrap, filter, expected) in [
+            (:clamp,  :linear,  [0.4, 1.0, 1.0, 0.0]),
+            (:repeat, :linear,  [0.4, 0.5, 0.7, 0.9]),
+            (:mirror, :linear,  [0.4, 1.0, 0.3, 0.1]),
+            (:clamp,  :nearest, [0.0, 1.0, 1.0, 0.0]),
+        ]
+        s = VR.GLSampler((wrap,), filter)
+        @test sampled(body1, tex1, s, coords1) ≈ expected atol = 0.01   # same texture, only the sampler differs
+        VR.gl_delete(s)
+    end
+
+    # 3-D 2×2×2, value = (i-1) + 2(j-1) + 4(k-1): wrap is per axis S, T, R = array dims 1, 2, 3
+    tex3 = VR.upload([(i - 1) + 2(j - 1) + 4(k - 1) for i in 1:2, j in 1:2, k in 1:2])
+    body3 = "uniform sampler3D tex; uniform vec3 coords[4]; float sample_at(int i) { return texture(tex, coords[i]).r; }"
+    s3 = VR.GLSampler((:clamp, :repeat, :mirror), :nearest)
+    @test sampled(body3, tex3, s3, [[1.1, 0.25, 0.25], [0.25, 1.1, 0.25], [0.25, 0.25, 1.6], [0.25, 0.25, 1.1]]) ≈ [1, 0, 0, 4]
+    VR.glcheck()
+    foreach(VR.gl_delete, (tex1, tex3, s3))
+end
+
+@testitem "framebuffers" setup = [GLContext] begin
+    import ModernGL as GL, VolumeRendering as VR
+    using ColorTypes, FixedPointNumbers
+    internal(t) = (r = Ref{GL.GLint}(0); GL.glBindTexture(GL.GL_TEXTURE_2D, t.id);
+                   GL.glGetTexLevelParameteriv(GL.GL_TEXTURE_2D, 0, GL.GL_TEXTURE_INTERNAL_FORMAT, r); r[])
+    scene = VR.scene_framebuffer(7, 5)
+    flt = VR.float_framebuffer(7, 5)
+    VR.glcheck()
+    @test (internal(scene.color), internal(scene.depth), internal(flt.color)) == (GL.GL_RGBA8, GL.GL_DEPTH_COMPONENT32F, GL.GL_RGBA16F)
+    @test isnothing(flt.depth)
+    @test scene.color.size == scene.depth.size == flt.color.size == (7, 5)
+
+    GL.glBindFramebuffer(GL.GL_FRAMEBUFFER, scene.fbo)
+    GL.glColorMask(true, true, true, true); GL.glDepthMask(true)
+    GL.glClearColor(1, 0.5, 0, 1); GL.glClearDepth(0.25); GL.glClear(GL.GL_COLOR_BUFFER_BIT | GL.GL_DEPTH_BUFFER_BIT)
+    @test all(==(RGBA{N0f8}(1, 0.5, 0, 1)), VR.read_texture(scene.color))
+    @test all(==(VR.Depth32(0.25)), VR.read_texture(scene.depth))
+    # the colour texture is complete with no sampler object bound (as when the host displays it)
+    p = VR.Program(GLContext.FULLSCREEN_VERT,
+                   "#version 410 core\nuniform sampler2D tex; out vec4 frag; void main() { frag = texture(tex, vec2(0.5)); }",
+                   Symbol[], [:tex])
+    probe = VR.float_framebuffer(1, 1)
+    GLContext.draw(p, probe) do
+        GL.glActiveTexture(GL.GL_TEXTURE0); GL.glBindTexture(GL.GL_TEXTURE_2D, scene.color.id); GL.glBindSampler(0, 0)
+    end
+    c = only(VR.read_texture(probe.color))
+    @test [c.r, c.g, c.b, c.alpha] ≈ [1, 0.5, 0, 1] atol = 0.01
+    foreach(VR.gl_delete, (p, probe))
+    # RGBA16F keeps a faint value that 8 bits would round to 0
+    GL.glBindFramebuffer(GL.GL_FRAMEBUFFER, flt.fbo)
+    GL.glClearColor(0.001, 0.25, 0.5, 1); GL.glClear(GL.GL_COLOR_BUFFER_BIT)
+    @test VR.read_texture(flt.color)[3, 2] == RGBA{Float16}(0.001, 0.25, 0.5, 1)
+    VR.glcheck()
+    foreach(VR.gl_delete, (scene, flt))
+end
+
+@testitem "instance buffer" setup = [GLContext] begin
+    import ModernGL as GL, VolumeRendering as VR
+    using ColorTypes, FixedPointNumbers, StaticArrays
+    # each instance: a square of half-size `half` px around pixel-space `center`, coloured `color`
+    vert = """
+        #version 410 core
+        layout(location = 0) in vec3 center; layout(location = 1) in float half_px; layout(location = 2) in vec3 color;
+        uniform vec2 viewport;
+        flat out vec3 vcolor;
+        void main() {
+            vec2 corner = vec2((gl_VertexID & 1) == 0 ? -1.0 : 1.0, (gl_VertexID >> 1) == 0 ? -1.0 : 1.0);
+            gl_Position = vec4((center.xy + corner * half_px) / viewport * 2.0 - 1.0, 0.0, 1.0);
+            vcolor = color;
+        }
+        """
+    frag = "#version 410 core\nflat in vec3 vcolor; out vec4 frag; void main() { frag = vec4(vcolor, 1.0); }"
+    records = [
+        (center = SVector{3,Float32}(1.5, 1.5, 0), half = 0.5f0, color = RGB{Float32}(1, 0, 0)),
+        (center = SVector{3,Float32}(5, 6, 0),     half = 1.0f0, color = RGB{Float32}(0, 1, 0)),
+    ]
+    buf = VR.InstanceBuffer(records)
+    @test buf.n == 2
+    p = VR.Program(vert, frag, [:viewport], Symbol[])
+    fb = VR.scene_framebuffer(8, 8)
+    GLContext.draw(p, fb; count = 4, instances = buf.n, vao = buf.vao, mode = GL.GL_TRIANGLE_STRIP) do
+        GL.glUniform2f(p.locations[:viewport], 8, 8)
+    end
+    img = VR.read_texture(fb.color)
+    red, green, none = RGBA{N0f8}(1, 0, 0, 1), RGBA{N0f8}(0, 1, 0, 1), RGBA{N0f8}(0, 0, 0, 0)
+    expected = [(i, j) == (2, 2) ? red : (i in 5:6 && j in 6:7) ? green : none for i in 1:8, j in 1:8]
+    @test img == expected
+    VR.gl_delete(buf)
+    @test GL.glIsVertexArray(buf.vao) == GL.GL_FALSE && GL.glIsBuffer(buf.vbo) == GL.GL_FALSE
+
+    # zero instances: valid, draws nothing
+    nobuf = VR.InstanceBuffer(empty(records))
+    @test nobuf.n == 0
+    GLContext.draw(p, fb; count = 4, instances = nobuf.n, vao = nobuf.vao, mode = GL.GL_TRIANGLE_STRIP) do
+        GL.glUniform2f(p.locations[:viewport], 8, 8)
+    end
+    @test all(==(none), VR.read_texture(fb.color))
+    VR.glcheck()
+    foreach(VR.gl_delete, (p, fb, nobuf))
+end
+
+@testitem "resource cache" setup = [GLContext] begin
+    import ModernGL as GL, VolumeRendering as VR
+    cache = VR.ResourceCache((8, 6), (4, 3))
+    @test (cache.scene_fb.color.size, cache.vol_fb.color.size, cache.accum_fb.color.size) == ((8, 6), (4, 3), (8, 6))
+
+    # textures by array identity
+    A, B = rand(Float32, 4, 4), rand(Float32, 4, 4)
+    tex(X) = get!(() -> VR.upload(X), cache.entries, VR.Identity(X))
+    tA = tex(A)
+    @test tex(A) === tA
+    @test tex(copy(A)).id != tA.id
+    tB = tex(B)
+
+    # programs by source text
+    frag(c) = "#version 410 core\nout vec4 frag; void main() { frag = vec4($c); }"
+    prog(f) = get!(() -> VR.Program(GLContext.FULLSCREEN_VERT, f, Symbol[], Symbol[]), cache.entries, (GLContext.FULLSCREEN_VERT, f))
+    p1 = prog(frag("1.0"))
+    @test prog(frag("1.0")) === p1
+    @test prog(String(codeunits(frag("1.0")))) === p1     # equal text, different String object
+    p2 = prog(frag("0.5"))
+    @test p2.id != p1.id
+    s = get!(() -> VR.GLSampler((:clamp, :clamp), :linear), cache.entries, ((:clamp, :clamp), :linear))
+    @test length(cache.entries) == 6
+    VR.glcheck()
+
+    # sweep frees exactly the entries the plan does not list
+    VR.sweep!(cache, Set{Any}([VR.Identity(A), (GLContext.FULLSCREEN_VERT, frag("1.0"))]))
+    @test issetequal(keys(cache.entries), [VR.Identity(A), (GLContext.FULLSCREEN_VERT, frag("1.0"))])
+    @test GL.glIsTexture(tA.id) == GL.GL_TRUE && GL.glIsProgram(p1.id) == GL.GL_TRUE
+    @test GL.glIsTexture(tB.id) == GL.GL_FALSE
+    @test GL.glIsProgram(p2.id) == GL.GL_FALSE
+    @test GL.glIsSampler(s.id) == GL.GL_FALSE
+    tex(B)                                                  # re-created after being swept
+    @test haskey(cache.entries, VR.Identity(B)) && GL.glIsTexture(cache.entries[VR.Identity(B)].id) == GL.GL_TRUE
+    VR.glcheck()
+
+    # framebuffers are replaced only on a size change
+    scene, vol = cache.scene_fb, cache.vol_fb
+    VR.fit_framebuffers!(cache, (8, 6), (2, 2))
+    @test cache.scene_fb === scene && cache.vol_fb !== vol && cache.vol_fb.color.size == (2, 2)
+    @test GL.glIsFramebuffer(vol.fbo) == GL.GL_FALSE || vol.fbo == cache.vol_fb.fbo   # freed first, so its name may be reused
+
+    GL.glBindVertexArray(cache.empty_vao); GL.glBindVertexArray(0)   # a VAO name becomes an object on first bind
+    @test GL.glIsVertexArray(cache.empty_vao) == GL.GL_TRUE
+    VR.free!(cache)
+    @test isempty(cache.entries)
+    @test GL.glIsVertexArray(cache.empty_vao) == GL.GL_FALSE
+    @test GL.glIsTexture(tA.id) == GL.GL_FALSE && GL.glIsProgram(p1.id) == GL.GL_FALSE
+    @test GL.glIsFramebuffer(cache.scene_fb.fbo) == GL.GL_FALSE && GL.glIsTexture(cache.scene_fb.depth.id) == GL.GL_FALSE
+    VR.glcheck()
+end
+
+@testitem "_" begin
+    import Aqua
+    import CompatHelperLocal as CHL
+    Aqua.test_all(VolumeRendering; ambiguities = false)
     Aqua.test_ambiguities(VolumeRendering)
     CHL.@check()
 end
