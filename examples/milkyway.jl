@@ -1,7 +1,6 @@
-# Milky Way volumetric example: a first-class RGBA emissive field. The NAOJ/OpenSpace volume is a
-# 1024×1024×128 RGBA grid (RGB = emission color). Five data-prep sliders shape each voxel before it
-# is rendered by the built-in DVR; each edit re-maps the whole grid and swaps the field. Drag to
-# orbit, scroll to zoom, right-click for the built-in render controls.
+# Milky Way volumetric example: an RGBA colour field. The NAOJ/OpenSpace volume is a 1024×1024×128 RGBA grid
+# (RGB = emission color). Five data-prep sliders shape each voxel before it is rendered by the built-in DVR; each edit
+# re-maps the whole grid and swaps the field. Drag to orbit, scroll to zoom, right-click for the render controls.
 
 using VolumeRendering, AxisKeys
 using Colors, FixedPointNumbers           # RGBA, red/green/blue; N0f8
@@ -28,9 +27,22 @@ function cell(c, p1, p2, k, pa, ka)
     a = clamp(ka * ((r + g + b) / 3)^pa, 0, 1)
     RGBA{Float32}(r * k, g * k, b * k, a)
 end
-mw_field(p1, p2, k, pa, ka) = KeyedArray(map(c -> cell(c, p1, p2, k, pa, ka), BASE); x = XS, y = YS, z = ZS)
+# an RGBA grid is a :color field: rgb = emission, alpha = extinction
+mw_field(p1, p2, k, pa, ka) = GridField(KeyedArray(map(c -> cell(c, p1, p2, k, pa, ka), BASE); x = XS, y = YS, z = ZS))
 
 const BASE = load_raw()
+
+p1 = Ref(Cfloat(2.0)); p2 = Ref(Cfloat(0.6)); k = Ref(Cfloat(40.0))   # RGB: raw power, color power, brightness
+pa = Ref(Cfloat(0.5)); ka = Ref(Cfloat(5.0))                          # alpha: power, scale
+
+vol = let f = mw_field(p1[], p2[], k[], pa[], ka[])   # `let`: no global keeps the 2 GiB grid alive after a remap
+    Volume(f; region = Box(f), density = 0.5)
+end
+# the camera frames the box, tilted off face-on so the disk reads as 3-D
+view = View([vol]; camera = orbit!(Camera(; bounds(vol.region)...), 0.6, 0.9))
+
+# a new field each edit; the old texture is freed before the new one is uploaded
+remap!() = (vol.color = mw_field(p1[], p2[], k[], pa[], ka[]))
 
 CImGui.set_backend(:GlfwOpenGL3)
 ctx = CImGui.CreateContext()
@@ -38,22 +50,10 @@ let io = CImGui.GetIO()
     io.ConfigFlags = unsafe_load(io.ConfigFlags) | CImGui.ImGuiConfigFlags_DockingEnable
 end
 
-view = Ref{Any}(nothing)
-p1 = Ref(Cfloat(2.0)); p2 = Ref(Cfloat(0.6)); k = Ref(Cfloat(40.0))   # RGB: raw power, color power, brightness
-pa = Ref(Cfloat(0.5)); ka = Ref(Cfloat(5.0))                          # alpha: power, scale
-
-remap!() = (view[].field = mw_field(p1[], p2[], k[], pa[], ka[]))
-
 CImGui.render(ctx;
     window_title = "VolumeRendering — Milky Way",
     window_size = (1100, 800),
     opengl_version = v"4.1") do
-    if view[] === nothing
-        view[] = FieldView(mw_field(p1[], p2[], k[], pa[], ka[]))
-        view[].params.opacity_scale = 0.5
-        orbit!(view[].camera, 0.6, 0.9)    # tilt off face-on so the disk reads as 3-D
-    end
-
     CImGui.DockSpaceOverViewport(0, CImGui.GetMainViewport(), CImGui.ImGuiDockNodeFlags_PassthruCentralNode)
 
     CImGui.Begin("Milky Way", C_NULL)
@@ -66,6 +66,6 @@ CImGui.render(ctx;
     ch |= @c CImGui.SliderFloat("alpha power", &pa[], 0.05f0, 3.0f0,  "%.2f")
     ch |= @c CImGui.SliderFloat("alpha scale", &ka[], 0.1f0, 20.0f0,  "%.2f", CImGui.ImGuiSliderFlags_Logarithmic)
     ch && remap!()
-    VolumeRendering.ShowVolume(view[])
+    VolumeRendering.ShowView(view)
     CImGui.End()
 end
