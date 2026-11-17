@@ -57,6 +57,9 @@ const PRELUDE = """
         v ^= v >> 16u;
         return float(v.x) * (1.0 / 4294967296.0);
     }
+
+    // a 256-texel LUT holds f(i/255) at texel i: map u ∈ [0, 1] onto the texel centres
+    vec4 vr_lut(sampler1D lut, float u) { return texture(lut, u * (255.0 / 256.0) + 0.5 / 256.0); }
     """
 
 const RECT_VERT = """
@@ -66,6 +69,20 @@ const RECT_VERT = """
         gl_Position = vec4((gl_VertexID & 1) == 0 ? vr_rect.x : vr_rect.z, (gl_VertexID >> 1) == 0 ? vr_rect.y : vr_rect.w, 0.0, 1.0);
     }
     """
+
+const FULLSCREEN = SVector(-1.0, -1.0, 1.0, 1.0)   # vr_rect of the Volume march and blits
+
+# copies a framebuffer attachment onto the current target (composite, accumulate); linear upscaling of vol_fb
+const BLIT_FRAG = """
+    #version 410 core
+    uniform sampler2D vr_src;
+    uniform vec2 vr_viewport;
+    out vec4 vr_frag;
+    void main() { vr_frag = texture(vr_src, gl_FragCoord.xy / vr_viewport); }
+    """
+
+# §6.7 hit selection per Surface variant; the near variant skips a Plane's single (coincident) hit
+const SURFACE_HITS = (opaque = "h.x > 0.0 ? h.x : h.y", far = "h.y", near = "h.x == h.y ? -1.0 : h.x")
 
 surface_body(t) = """
     void main() {
@@ -78,6 +95,61 @@ surface_body(t) = """
         gl_FragDepth = vr_near / t;
     }
     """
+
+const VOLUME_DECLS = """
+    uniform ivec2 vr_scene_size, vr_vol_size;
+    uniform int vr_sample;
+    uniform float vr_step_scale, vr_density;
+    uniform sampler2D vr_scene_depth;
+    """
+
+# MIP and average have no intrinsic opacity: the layer alpha is the extinction LUT at the reduced value
+mapped_layer(v) = "float u = vr_norm($v); float a = clamp(vr_alpha(u), 0.0, 1.0); vr_frag = vec4(vr_lut(vr_cmap, u).rgb * a, a);"
+
+# §6.5 per-mode parts of the march: accumulator declarations, per-sample update, output
+const VOLUME_MODES = (
+    dvr = (init = "vec3 col = vec3(0.0); float alpha = 0.0;",
+           step = "vec4 c = vr_color(pos); float av = 1.0 - exp(-c.a * vr_density * dt); " *   # dt-correct opacity
+                  "col += (1.0 - alpha) * av * c.rgb; alpha += (1.0 - alpha) * av; if (alpha > 0.995) break;",
+           out = "vr_frag = vec4(col, alpha);"),
+    mip = (init = "float vmax = -1e30;",   # fields may be negative
+           step = "vmax = max(vmax, value(pos));",
+           out = mapped_layer("vmax")),
+    average = (init = "float vsum = 0.0, vlen = 0.0;",   # dt-weighted: the spacing varies
+               step = "vsum += value(pos) * dt; vlen += dt;",
+               out = mapped_layer("vsum / vlen")),
+)
+
+volume_body(mode::Symbol) = let (; init, step, out) = VOLUME_MODES[mode]
+    """
+    void main() {
+        vec3 ro, rd; vr_ray(gl_FragCoord.xy / vr_viewport * 2.0 - 1.0, ro, rd);
+        vec2 tr = vr_hit(ro, rd);
+        float tn = max(tr.x, 0.0), tfar = tr.y;   // the region may start behind the eye
+        // clip at the nearest scene depth over this cell's full-res footprint, so sub-cell-thin lines are not missed
+        ivec2 fc = ivec2(gl_FragCoord.xy);
+        ivec2 b0 = fc * vr_scene_size / vr_vol_size, b1 = (fc + 1) * vr_scene_size / vr_vol_size;
+        float d = 0.0;
+        for (int y = b0.y; y < b1.y; y++)
+            for (int x = b0.x; x < b1.x; x++)
+                d = max(d, texelFetch(vr_scene_depth, ivec2(x, y), 0).r);
+        if (d > 0.0) tfar = min(tfar, vr_near / d);
+        if (tfar <= tn) { vr_frag = vec4(0.0); return; }   // missed or fully clipped
+        // entry jitter: van der Corput over refinement frames, rotated per pixel
+        float vdc = float(bitfieldReverse(uint(vr_sample))) * 2.3283064365386963e-10;
+        float t = tn + fract(vdc + vr_hash12(uvec2(gl_FragCoord.xy))) * (vr_step_scale * stepSize(ro + rd * tn));
+        if (t >= tfar) { vr_frag = vec4(0.0); return; }   // no sample: like a miss
+        $init
+        for (int s = 0; s < 2048 && t < tfar; s++) {
+            vec3 pos = ro + rd * t;
+            float dt = vr_step_scale * stepSize(pos);
+            $step
+            t += dt;
+        }
+        $out
+    }
+    """
+end
 
 # per-vertex payload of a Lines program: GLSL type and varying name
 varying(::Vector{<:Vector{<:Color}}) = ("vec3", "vr_vrgb")
@@ -134,7 +206,7 @@ const LINES_BODY = """
 field_part(f) = (; object = f, textures = textures(f), uniforms = uniforms(f), glsl = field_glsl(f))
 shape_part(s) = (; object = s, textures = (;), uniforms = uniforms(s), glsl = shape_glsl(s))
 
-mapped_bridge(v) = "vec4 vr_color(vec3 p) { float u = vr_norm($v); return vec4(texture(vr_cmap, u).rgb, vr_alpha(u)); }\n"
+mapped_bridge(v) = "vec4 vr_color(vec3 p) { float u = vr_norm($v); return vec4(vr_lut(vr_cmap, u).rgb, vr_alpha(u)); }\n"
 
 rgb32(c::Color) = (x = RGB{Float32}(c); SVector(x.r, x.g, x.b))
 
@@ -163,11 +235,28 @@ colormap_lut(scheme::ColorScheme) = map(u -> RGBA{Float32}(get(scheme, u)), rang
 colormap_decls(::Nothing) = ""
 colormap_decls(::Colormap) = "uniform sampler1D vr_cmap;\nuniform float vr_cmap_lo, vr_cmap_hi;\n"
 
-colormap_glsl(::Nothing) = ""
-colormap_glsl(c::Colormap) = """
+colormap_glsl(::Nothing, _) = ""
+colormap_glsl(c::Colormap, extinction) = """
     float vr_norm(float v) { return clamp(($(c.log ? "log(max(v, 1e-30))" : "v") - vr_cmap_lo) / (vr_cmap_hi - vr_cmap_lo), 0.0, 1.0); }
-    float vr_alpha(float u) { return 1.0; }
-    """
+    $(alpha_glsl(extinction))"""
+
+# ── extinction (§5): only a Volume with a Mapped colour has one ──
+
+mapped_extinction(::Mapped, m::Volume) = m.extinction
+mapped_extinction(_, ::Volume) = nothing
+
+alpha_glsl(::Nothing) = "float vr_alpha(float u) { return 1.0; }\n"
+alpha_glsl(_) = "float vr_alpha(float u) { return vr_lut(vr_extinction, u).r; }\n"
+
+extinction_decls(::Nothing) = ""
+extinction_decls(_) = "uniform sampler1D vr_extinction;\n"
+
+# piecewise-linear σ(u) through the sorted points, constant beyond the end points
+extinction_lut(pts) = map(range(0.0, 1.0; length = 256)) do u
+    i = clamp(searchsortedlast(pts, u; by = first), 1, length(pts) - 1)
+    (u0, s0), (u1, s1) = pts[i], pts[i+1]
+    convert(Float32, u1 > u0 ? s0 + (s1 - s0) * clamp((u - u0) / (u1 - u0), 0, 1) : s1)
+end
 
 colormap_uniforms(::Nothing) = (;)
 colormap_uniforms(c::Colormap) = let (lo, hi) = map(x -> c.log ? log(x) : x, endpoints(c.window))
@@ -178,20 +267,30 @@ end
 
 const MAX_SAMPLERS = 16   # GL_MAX_TEXTURE_IMAGE_UNITS on macOS GL 4.1
 
-# one texture unit: sampler uniform name, texture cache key and its builder, sampler-object key (wrap, filter)
+# a framebuffer attachment of the view (§6.3), bound like a texture; owned by the view, not a cache entry. Resolved at
+# draw time: the framebuffers are (re)sized after the plan is built
+struct Attachment
+    get::Function   # ResourceCache → GLTexture
+end
+
+# one texture unit: sampler uniform name, texture (cache key => builder, or an Attachment), sampler-object key
 struct Unit
     name::Symbol
-    key::Any
-    make::Any
+    texture::Union{Pair,Attachment}
     sampler::Tuple{Tuple,Symbol}
 end
 
-texture_unit(name, t::Texture) = Unit(name, Identity(cache_key(t.data)), () -> upload(cache_key(t.data)), (t.wrap, t.filter))
+texture_unit(name, t::Texture) = Unit(name, Identity(cache_key(t.data)) => () -> upload(cache_key(t.data)), (t.wrap, t.filter))
+attachment_unit(name, get, filter) = Unit(name, Attachment(get), ((:clamp, :clamp), filter))
 
 colormap_units(::Nothing) = Unit[]
-colormap_units(c::Colormap) = [Unit(:vr_cmap, (:colormap, c.scheme), () -> upload(colormap_lut(c.scheme)), ((:clamp,), :linear))]
+colormap_units(c::Colormap) = [Unit(:vr_cmap, (:colormap, c.scheme) => () -> upload(colormap_lut(c.scheme)), ((:clamp,), :linear))]
 
-# one draw call of the frame plan
+extinction_units(::Nothing) = Unit[]
+# the key holds a copy: it is compared by value, and an in-place edit must not change a stored key
+extinction_units(e) = (pts = copy(e); [Unit(:vr_extinction, (:extinction, pts) => () -> upload(extinction_lut(pts)), ((:clamp,), :linear))])
+
+# one draw call of the frame plan; marks assemble to `pass => Draw` steps, pass ∈ :opaque | :march | :composite | :translucent (§6.3)
 struct Draw
     vert::String
     frag::String
@@ -203,25 +302,28 @@ end
 # the cache entries a draw needs: key => builder
 requirements(d::Draw) = [
     (d.vert, d.frag) => () -> Program(d.vert, d.frag, collect(keys(d.uniforms)), map(u -> u.name, d.units));
-    map(u -> u.key => u.make, d.units);
+    mapreduce(u -> texture_requirements(u.texture), vcat, d.units; init = []);
     map(u -> u.sampler => () -> GLSampler(u.sampler...), d.units);
     buffer_requirements(d.buffer)]
+
+texture_requirements(t::Pair) = [t]
+texture_requirements(::Attachment) = []
 
 buffer_requirements(::Nothing) = []
 buffer_requirements(b::Pair) = [b]
 
 # fragment source, uniforms and units of one program (§6.4); validates everything before any GL call
-function assemble_fragment(color, objects, engine_decls, body)
+function assemble_fragment(color, objects, engine_decls, body; extinction = nothing, engine_units = Unit[])
     check_declared_names(map(o -> o.object, objects))
     texs = mapreduce(o -> o.textures, merge, objects; init = (;))
     unis = mapreduce(o -> o.uniforms, merge, objects; init = (;))
-    units = [map(texture_unit, keys(texs), values(texs))...; colormap_units(color.colormap)]
+    units = [map(texture_unit, keys(texs), values(texs))...; colormap_units(color.colormap); extinction_units(extinction); engine_units]
     length(units) <= MAX_SAMPLERS ||
         throw(ArgumentError("a program needs $(length(units)) samplers, more than GL_MAX_TEXTURE_IMAGE_UNITS = $MAX_SAMPLERS"))
     decls = join([map((n, t) -> "uniform sampler$(ndims(t.data))D $n;\n", keys(texs), values(texs))...;
                   map(uniform_decl, keys(unis), values(unis))...;
-                  colormap_decls(color.colormap); color.decls; engine_decls])
-    frag = join([PRELUDE, decls, map(o -> o.glsl, objects)..., colormap_glsl(color.colormap), color.bridge, body], "\n")
+                  colormap_decls(color.colormap); extinction_decls(extinction); color.decls; engine_decls])
+    frag = join([PRELUDE, decls, map(o -> o.glsl, objects)..., colormap_glsl(color.colormap, extinction), color.bridge, body], "\n")
     (; frag, uniforms = merge(unis, colormap_uniforms(color.colormap), color.uniforms), units)
 end
 
@@ -246,22 +348,41 @@ function impostor_rect(shape, cam::Camera, w, h)
     SVector(lo..., hi...)
 end
 
-# opaque variant (§6.7); the far/near variants of translucent surfaces only change `t`
-function assemble(m::Surface, cam::Camera, w, h)
+# `frame`: (; camera, w, h, vsize = volume march size, sample = refinement frame index); every method returns its steps
+
+# §6.7: opacity 1 → one opaque draw; else far hits, then near hits, blended
+assemble(m::Surface, frame) = m.opacity == 1 ? [:opaque => surface_draw(m, :opaque, frame)] :
+                                               [:translucent => surface_draw(m, :far, frame), :translucent => surface_draw(m, :near, frame)]
+
+function surface_draw(m::Surface, variant, (; camera, w, h))
     color = color_source(m.color)
     (; frag, uniforms, units) = assemble_fragment(color, [color.objects; shape_part(m.shape)], "uniform float vr_opacity;\n",
-                                                  surface_body("h.x > 0.0 ? h.x : h.y"))
-    engine = (; vr_rect = impostor_rect(m.shape, cam, w, h), vr_opacity = m.opacity)
-    Draw(RECT_VERT, frag, merge(frame_uniforms(cam, w, h), uniforms, engine), units, nothing)
+                                                  surface_body(SURFACE_HITS[variant]))
+    engine = (; vr_rect = impostor_rect(m.shape, camera, w, h), vr_opacity = m.opacity)
+    Draw(RECT_VERT, frag, merge(frame_uniforms(camera, w, h), uniforms, engine), units, nothing)
 end
 
-function assemble(m::Lines, cam::Camera, w, h)
+function assemble(m::Lines, (; camera, w, h))
     color = color_source(m.color)
     (; frag, uniforms, units) = assemble_fragment(color, color.objects, LINES_DECLS, LINES_BODY)
-    engine = (; vr_viewproj = view_proj(cam, w / h), vr_width_px = m.width_px)
+    engine = (; vr_viewproj = view_proj(camera, w / h), vr_width_px = m.width_px)
     buffer = (Identity(m.polylines), payload_key(color.payload)) => () -> InstanceBuffer(segment_records(m.polylines, color.payload))
-    Draw(lines_vert(color.payload), frag, merge(frame_uniforms(cam, w, h), uniforms, engine), units, buffer)
+    [:opaque => Draw(lines_vert(color.payload), frag, merge(frame_uniforms(camera, w, h), uniforms, engine), units, buffer)]
 end
+
+# §6.5: march into vol_fb at vsize (same aspect w/h), then composite over the scene
+function assemble(m::Volume, (; camera, w, h, vsize, sample))
+    color = color_source(m.color)
+    (; frag, uniforms, units) = assemble_fragment(color, [color.objects; shape_part(m.region)], VOLUME_DECLS, volume_body(m.mode);
+                                                  extinction = mapped_extinction(m.color, m),
+                                                  engine_units = [attachment_unit(:vr_scene_depth, c -> c.scene_fb.depth, :nearest)])
+    engine = (; vr_rect = FULLSCREEN, vr_viewport = SVector(float.(vsize)...), vr_scene_size = SVector(w, h), vr_vol_size = SVector(vsize...),
+                vr_sample = sample, vr_step_scale = m.step_scale, vr_density = m.density)
+    [:march => Draw(RECT_VERT, frag, merge(frame_uniforms(camera, w, h), uniforms, engine), units, nothing),
+     :composite => blit(attachment_unit(:vr_src, c -> c.vol_fb.color, :linear), w, h)]
+end
+
+blit(src::Unit, w, h) = Draw(RECT_VERT, BLIT_FRAG, (; vr_rect = FULLSCREEN, vr_viewport = SVector(float(w), float(h))), [src], nothing)
 
 payload_key(::Nothing) = nothing
 payload_key(p) = Identity(p)
@@ -281,22 +402,28 @@ segment_records(polylines, payload) =
 
 gl_enable(cap, on::Bool) = on ? GL.glEnable(cap) : GL.glDisable(cap)
 
-# the full state a pass depends on; programs and VAOs are set by every draw
-function pass_state!(w, h; depth_test::Bool, depth_write::Bool)
+# the full state a pass depends on; programs and VAOs are set by every draw. `blend`: (src, dst) factors, or nothing
+function pass_state!(w, h; depth_test::Bool, depth_write::Bool, blend = nothing, blend_alpha = 0)
     GL.glViewport(0, 0, w, h)
     GL.glDisable(GL.GL_SCISSOR_TEST); GL.glDisable(GL.GL_CULL_FACE)
     gl_enable(GL.GL_DEPTH_TEST, depth_test); GL.glDepthFunc(GL.GL_GEQUAL); GL.glDepthMask(depth_write)
     GL.glColorMask(true, true, true, true); GL.glDepthRange(0, 1)
-    GL.glDisable(GL.GL_BLEND); GL.glBlendFunc(GL.GL_ONE, GL.GL_ZERO); GL.glBlendColor(0, 0, 0, 0); GL.glBlendEquation(GL.GL_FUNC_ADD)
+    gl_enable(GL.GL_BLEND, !isnothing(blend)); GL.glBlendFunc(something(blend, (GL.GL_ONE, GL.GL_ZERO))...)
+    GL.glBlendColor(0, 0, 0, blend_alpha); GL.glBlendEquation(GL.GL_FUNC_ADD)
     GL.glDisable(GL.GL_STENCIL_TEST); GL.glDisable(GL.GL_SAMPLE_ALPHA_TO_COVERAGE); GL.glDisable(GL.GL_MULTISAMPLE)
     GL.glPolygonMode(GL.GL_FRONT_AND_BACK, GL.GL_FILL)
 end
+
+const OVER = (GL.GL_ONE, GL.GL_ONE_MINUS_SRC_ALPHA)   # premultiplied colour over the target
+
+texture(cache::ResourceCache, (key, _)::Pair) = cache.entries[key]
+texture(cache::ResourceCache, a::Attachment) = a.get(cache)
 
 function draw!(cache::ResourceCache, d::Draw)
     prog = cache.entries[(d.vert, d.frag)]
     GL.glUseProgram(prog.id)
     foreach(((n, x),) -> set_uniform(prog.id, prog.locations[n], x), pairs(d.uniforms))
-    foreach(((i, u),) -> bind_texture(i - 1, cache.entries[u.key], cache.entries[u.sampler]), enumerate(d.units))
+    foreach(((i, u),) -> bind_texture(i - 1, texture(cache, u.texture), cache.entries[u.sampler]), enumerate(d.units))
     draw_strip!(cache, d.buffer)
 end
 
@@ -313,6 +440,32 @@ function opaque_pass!(cache::ResourceCache, draws, background, w, h)
     foreach(d -> draw!(cache, d), draws)
 end
 
+# one step of the translucent pass, in list order
+translucent_step!(cache::ResourceCache, (pass, d)::Pair, w, h) = translucent_step!(Val(pass), cache, d, w, h)
+
+function translucent_step!(::Val{:march}, cache, d, w, h)
+    GL.glBindFramebuffer(GL.GL_FRAMEBUFFER, cache.vol_fb.fbo)
+    pass_state!(cache.vol_fb.color.size...; depth_test = false, depth_write = false)
+    GL.glClearColor(0, 0, 0, 0); GL.glClear(GL.GL_COLOR_BUFFER_BIT)
+    draw!(cache, d)
+end
+translucent_step!(::Val{:composite}, cache, d, w, h) = scene_step!(cache, d, w, h; depth_test = false)
+translucent_step!(::Val{:translucent}, cache, d, w, h) = scene_step!(cache, d, w, h; depth_test = true)
+
+function scene_step!(cache, d, w, h; depth_test)
+    GL.glBindFramebuffer(GL.GL_FRAMEBUFFER, cache.scene_fb.fbo)
+    pass_state!(w, h; depth_test, depth_write = false, blend = OVER)
+    draw!(cache, d)
+end
+
+# §6.3 step 3: fold the n-th frame into the running mean
+function accumulate_pass!(cache::ResourceCache, d::Draw, n, w, h)
+    GL.glBindFramebuffer(GL.GL_FRAMEBUFFER, cache.accum_fb.fbo)
+    pass_state!(w, h; depth_test = false, depth_write = false,
+                blend = n == 1 ? nothing : (GL.GL_CONSTANT_ALPHA, GL.GL_ONE_MINUS_CONSTANT_ALPHA), blend_alpha = 1 / n)
+    draw!(cache, d)
+end
+
 # ── public entry points (§8) ──
 
 refine_target(view::View) = any(jittered, view.marks) ? view.refine_frames : 1
@@ -321,34 +474,40 @@ volume_size(view::View, w, h) = let s = min(1, view.max_volume_px / max(w, h))
     (max(1, round(Int, w * s)), max(1, round(Int, h * s)))
 end
 
+# the running mean while refining, else the scene
+displayed(view::View) = refine_target(view) > 1 ? view.cache.accum_fb.color : view.cache.scene_fb.color
+
 function render!(view::View, w::Integer, h::Integer)
     w >= 1 && h >= 1 || throw(ArgumentError("render! needs w, h ≥ 1, got $w × $h"))
     validate(view); foreach(validate, view.marks)
     snap = snapshot(view, w, h)
+    nmax = refine_target(view)
     if !isequal(snap, view.last)
         view.last = snap; view.nsamp = 0
-    elseif view.nsamp >= refine_target(view)
-        return view.cache.scene_fb.color.id
+    elseif view.nsamp >= nmax
+        return displayed(view).id
     end
-    all(m -> m isa Lines || (m isa Surface && m.opacity == 1), view.marks) ||
-        error("Volume and translucent Surface rendering is not implemented yet")
-    draws = map(m -> assemble(m, view.camera, w, h), view.marks)
+    vsize = volume_size(view, w, h)
+    steps = mapreduce(m -> assemble(m, (; camera = view.camera, w, h, vsize, sample = view.nsamp)), vcat, view.marks; init = Pair{Symbol,Draw}[])
+    accum = blit(attachment_unit(:vr_src, c -> c.scene_fb.color, :nearest), w, h)   # drawn only when refining
+    draws = [last.(steps); nmax > 1 ? [accum] : Draw[]]
     needs = Dict{Any,Any}(Iterators.flatten(map(requirements, draws)))
 
     prev_fbo = Ref{GL.GLint}(0); GL.glGetIntegerv(GL.GL_FRAMEBUFFER_BINDING, prev_fbo)
-    vsize = volume_size(view, w, h)
     cache = @something(view.cache, view.cache = ResourceCache((w, h), vsize))
     sweep!(cache, keys(needs))   # before any upload: a swapped-out texture is freed before its replacement
     foreach(((k, make),) -> get!(make, cache.entries, k), needs)
     fit_framebuffers!(cache, (w, h), vsize)
-    opaque_pass!(cache, draws, view.background, w, h)
+    opaque_pass!(cache, map(last, filter(s -> first(s) === :opaque, steps)), view.background, w, h)
+    foreach(s -> translucent_step!(cache, s, w, h), filter(s -> first(s) !== :opaque, steps))
+    nmax > 1 && accumulate_pass!(cache, accum, view.nsamp + 1, w, h)
     GL.glBindFramebuffer(GL.GL_FRAMEBUFFER, prev_fbo[])
     GL.glBindVertexArray(0)   # keep later foreign attribute calls off our VAOs
     # the host samples the displayed texture with its own filters, not with a sampler object left on a unit
     foreach(unit -> GL.glBindSampler(unit, 0), 0:maximum(d -> length(d.units), draws; init = 0) - 1)
     glcheck()
     view.nsamp += 1
-    cache.scene_fb.color.id
+    displayed(view).id
 end
 
 # GL layout (x, y from the bottom) → standard image layout (row, col from the top)
@@ -356,7 +515,7 @@ image_layout(A::AbstractMatrix) = reverse(permutedims(A); dims = 1)
 
 function render_image(view::View, w::Integer, h::Integer)
     foreach(_ -> render!(view, w, h), 1:refine_target(view))
-    image_layout(map(c -> RGB{N0f8}(c), read_texture(view.cache.scene_fb.color)))
+    image_layout(map(c -> RGB{N0f8}(c), read_texture(displayed(view))))
 end
 
 # internal, for tests: 0 = nothing drawn, else vr_near / t
