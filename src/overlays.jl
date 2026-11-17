@@ -157,11 +157,9 @@ end
     gl::CachedLines = CachedLines()
 end
 
-# Interleaved (x,y,z, r,g,b) vertices for the 12 edges of [lo,hi] (drawn as GL_LINES).
-function _boxoutline_verts(lo, hi, color)
-    c = RGB{Float32}(color)
-    xs = (lo[1], hi[1]); ys = (lo[2], hi[2]); zs = (lo[3], hi[3])
-    corner(ix, iy, iz) = (Float32(xs[ix]), Float32(ys[iy]), Float32(zs[iz]))
+# The 12 edges of the box [lo,hi], as two-point polylines.
+function _boxoutline_polylines(lo, hi)
+    corner(ix, iy, iz) = SVector((lo[1], hi[1])[ix], (lo[2], hi[2])[iy], (lo[3], hi[3])[iz])
     edges = (
         ((1, 1, 1), (2, 1, 1)), ((1, 2, 1), (2, 2, 1)),     # 4 edges ∥ x
         ((1, 1, 2), (2, 1, 2)), ((1, 2, 2), (2, 2, 2)),
@@ -170,17 +168,13 @@ function _boxoutline_verts(lo, hi, color)
         ((1, 1, 1), (1, 1, 2)), ((2, 1, 1), (2, 1, 2)),     # 4 edges ∥ z
         ((1, 2, 1), (1, 2, 2)), ((2, 2, 1), (2, 2, 2)),
     )
-    out = Float32[]
-    for (ca, cb) in edges
-        append!(out, (corner(ca...)..., c.r, c.g, c.b, corner(cb...)..., c.r, c.g, c.b))
-    end
-    out
+    [[corner(ca...), corner(cb...)] for (ca, cb) in edges]
 end
 
 function refresh!(o::BoxOutlineOverlay, ctx::GeomContext)
     lo, hi = aabb(something(o.region, ctx.region))
     refresh!(o.gl, (lo, hi, o.color)) do
-        _boxoutline_verts(lo, hi, o.color)
+        _polylines_verts(_boxoutline_polylines(lo, hi), o.color)
     end
     o
 end
@@ -190,11 +184,12 @@ draw!(o::BoxOutlineOverlay, ctx::GeomContext) = (draw!(o.gl, ctx.viewproj); o)
 # ── SphereOutlineOverlay: lat/lon graticule of a region's bounding sphere, as GL_LINES ──
 # The mirror of BoxOutlineOverlay: that one outlines `aabb(region)`, this one `bounds(region)`. An
 # arbitrary reference sphere is a `SphereRegion`, whose bounds are itself.
+# Its lines circumscribe the sphere, like SpherePolylinesOverlay's.
 @kwdef mutable struct SphereOutlineOverlay <: Overlay
     region::Union{Nothing,Region} = nothing         # explicit region, else ctx.region at draw time
     parallels::Union{Integer,AbstractVector} = 3    # latitudes, or how many of them
     meridians::Union{Integer,AbstractVector} = 6    # azimuths, or how many of them
-    segments::Int = 64                              # segments per full circle
+    segments::Int = 64                              # segments per full circle (a meridian gets half)
     color::RGB{Float64} = RGB(0.5, 0.5, 0.55)
     enabled::Bool = true
     gl::CachedLines = CachedLines()
@@ -210,43 +205,82 @@ _parallel_lats(lats) = lats
 _meridian_lons(n::Integer) = range(; start = 0.0, step = 2π / n, length = n)
 _meridian_lons(lons) = lons
 
-_sphere_point(center, radius, lat, lon) =
-    center + radius * SVector(cos(lat) * cos(lon), cos(lat) * sin(lon), sin(lat))
+_unit_point(lat, lon) = SVector(cos(lat) * cos(lon), cos(lat) * sin(lon), sin(lat))
 
-# Consecutive point pairs of a polyline, as GL_LINES vertices.
-function _push_polyline!(out, points, c::RGB{Float32})
-    for (a, b) in zip(points, @view points[2:end])
-        append!(out, (a..., c.r, c.g, c.b, b..., c.r, c.g, c.b))
-    end
-    out
-end
-
-# Interleaved (x,y,z, r,g,b) vertices for the graticule of the sphere (center, radius): rings at
-# fixed latitude plus half great circles pole to pole. Angles are radians — Unitful angles work too,
-# since they only ever reach `sin`/`cos`. `segments` counts a FULL circle, so a meridian gets half.
-function _sphereoutline_verts(center, radius, parallels, meridians, segments, color)
-    c = RGB{Float32}(color)
-    out = Float32[]
-    for lat in _parallel_lats(parallels)
-        _push_polyline!(out, [_sphere_point(center, radius, lat, lon)
-                              for lon in range(0, 2π, segments + 1)], c)
-    end
-    for lon in _meridian_lons(meridians)
-        _push_polyline!(out, [_sphere_point(center, radius, lat, lon)
-                              for lat in range(-π/2, π/2, segments ÷ 2 + 1)], c)
-    end
-    out
-end
+# The graticule as directions: rings at fixed latitude, then half great circles pole to pole. Angles are
+# radians — Unitful angles work too, since they only ever reach `sin`/`cos`.
+_graticule(parallels, meridians, segments) = vcat(
+    [[_unit_point(lat, lon) for lon in range(0, 2π, segments + 1)] for lat in _parallel_lats(parallels)],
+    [[_unit_point(lat, lon) for lat in range(-π/2, π/2, segments ÷ 2 + 1)] for lon in _meridian_lons(meridians)])
 
 function refresh!(o::SphereOutlineOverlay, ctx::GeomContext)
     center, radius = bounds(something(o.region, ctx.region))
     refresh!(o.gl, (center, radius, o.parallels, o.meridians, o.segments, o.color)) do
-        _sphereoutline_verts(center, radius, o.parallels, o.meridians, o.segments, o.color)
+        _polylines_verts(_circumscribed(center, radius, _graticule(o.parallels, o.meridians, o.segments)), o.color)
     end
     o
 end
 
 draw!(o::SphereOutlineOverlay, ctx::GeomContext) = (draw!(o.gl, ctx.viewproj); o)
+
+# ── SpherePolylinesOverlay: curves on a region's bounding sphere, as GL_LINES ──
+# Each curve is a polyline of directions from the sphere's center (any length: only the direction counts).
+@kwdef mutable struct SpherePolylinesOverlay <: Overlay
+    polylines::Vector{Vector{SVector{3,Float64}}}
+    region::Union{Nothing,Region} = nothing         # explicit region, else ctx.region at draw time
+    color::RGB{Float64} = RGB(0.8, 0.8, 0.85)
+    enabled::Bool = true
+    gl::CachedLines = CachedLines()
+end
+SpherePolylinesOverlay(polylines; kwargs...) = SpherePolylinesOverlay(; polylines, kwargs...)
+
+# Curves of directions drawn circumscribing the sphere (center, radius): scaled out until the chord of their
+# widest step touches it at its midpoint (a chord between directions σ apart dips to cos(σ/2) of its ends'
+# radius), so no segment dips inside, where a sphere of the same radius would hide it.
+function _circumscribed(center, radius, curves)
+    dirs = map(c -> normalize.(c), curves)
+    σmax = maximum((atan(norm(cross(a, b)), dot(a, b)) for d in dirs for (a, b) in zip(d, @view d[2:end])); init = 0.0)
+    map(d -> map(u -> center + radius / cos(σmax / 2) * u, d), dirs)
+end
+
+# Keyed on the hash, not the vector itself: see PolylinesOverlay.
+function refresh!(o::SpherePolylinesOverlay, ctx::GeomContext)
+    center, radius = bounds(something(o.region, ctx.region))
+    refresh!(o.gl, (hash(o.polylines), center, radius, o.color)) do
+        _polylines_verts(_circumscribed(center, radius, o.polylines), o.color)
+    end
+    o
+end
+
+draw!(o::SpherePolylinesOverlay, ctx::GeomContext) = (draw!(o.gl, ctx.viewproj); o)
+
+# ── PolylinesOverlay: world-space polylines, as GL_LINES ──
+# The general form of the line overlays above, for any curves: orbits, rays.
+@kwdef mutable struct PolylinesOverlay <: Overlay
+    polylines::Vector{Vector{SVector{3,Float64}}}
+    color::RGB{Float64} = RGB(0.8, 0.8, 0.85)
+    enabled::Bool = true
+    gl::CachedLines = CachedLines()
+end
+PolylinesOverlay(polylines; kwargs...) = PolylinesOverlay(; polylines, kwargs...)
+
+# Interleaved (x,y,z, r,g,b) GL_LINES vertices: each polyline's consecutive point pairs.
+function _polylines_verts(polylines, color)
+    c = RGB{Float32}(color)
+    Float32[x for pl in polylines for (a, b) in zip(pl, @view pl[2:end])
+              for x in (a..., c.r, c.g, c.b, b..., c.r, c.g, c.b)]
+end
+
+# Keyed on the hash, not the vector itself: the cache would hold the same object, so an in-place edit
+# of `polylines` would compare equal and never re-upload.
+function refresh!(o::PolylinesOverlay, ::GeomContext)
+    refresh!(o.gl, (hash(o.polylines), o.color)) do
+        _polylines_verts(o.polylines, o.color)
+    end
+    o
+end
+
+draw!(o::PolylinesOverlay, ctx::GeomContext) = (draw!(o.gl, ctx.viewproj); o)
 
 # ── StreamlinesOverlay: evenly-spaced field lines of a VectorField, colored by |V| ──
 @kwdef mutable struct StreamlinesOverlay <: Overlay

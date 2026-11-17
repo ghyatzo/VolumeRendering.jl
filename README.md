@@ -116,15 +116,23 @@ view = FieldView(A; overlays = [
     SphereOutlineOverlay(),           # lat/lon graticule of the region's bounding sphere
     AxesOverlay(),                    # x/y/z axes through the center
     SphereOverlay(radius = 0.4),      # sphere geometry
+    PolylinesOverlay([[SVector(0., 0, 0), SVector(1., 0, 0), SVector(1., 1, 0)]]),   # any world-space polylines
+    SpherePolylinesOverlay([[SVector(1., 0, 0), SVector(1., 1, 0)]]),               # curves on the region's bounding sphere
 ])
 ```
 
 Each overlay carries its own `enabled` flag, so a host UI can toggle them per frame.
 
+A view needs no volume at all: `FieldView(nothing; region, overlays)` shows the overlays alone, `region` framing the camera.
+`view.field` can switch between `nothing` and a field at any time.
+
 `SurfaceSliceOverlay` is `SliceOverlay` on a curved surface: it colors the near boundary of any `Region`, eg a `SphereRegion` or  `BoxRegion`.
 
 `BoxOutlineOverlay`/`SphereOutlineOverlay` outline the view's region by default; pass `region` to outline
 another one — e.g. `SphereOutlineOverlay(region = SphereRegion(radius = 8.0))` for a reference sphere.
+`SpherePolylinesOverlay` draws curves given as directions from the center of a sphere (`region`, as for the outlines).
+Both it and `SphereOutlineOverlay` circumscribe their sphere: scaled out just enough that no segment dips inside,
+so they stay visible on a `SphereOverlay` of the same radius.
 Their `parallels`/`meridians` take either a count or explicit angles, in radians or as Unitful angles:
 
 ```julia

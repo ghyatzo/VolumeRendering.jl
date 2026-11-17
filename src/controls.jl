@@ -79,12 +79,44 @@ function _tf_colorbar!(tf::TransferFunction, width::Real)
     nothing
 end
 
-# Emit the controls into the current ImGui window (no Begin/End of its own). Built per field kind:
-# color (RGBA) fields omit the mode selector + Transfer-function section and render DVR-only.
+# Emit the controls into the current ImGui window (no Begin/End of its own). The volume sections only
+# when the view has a field.
 function ShowControls(view::FieldView)
     _ensure_implot!()
-    params = view.params; tf = view.tf; cam = view.camera
+    params = view.params; cam = view.camera
     hw = (CImGui.GetContentRegionAvail().x - 6) / 2   # half content width, for paired items
+    isnothing(view.field) || _volume_controls!(view, hw)
+
+    CImGui.SeparatorText("View")
+    let sel = _radio_row("proj", (("perspective", nothing), ("ortho", nothing)),
+                         cam.projection === :perspective ? 0 : 1)
+        sel !== nothing && (cam.projection = sel == 0 ? :perspective : :ortho)
+    end
+    if CImGui.Button("reset view")
+        c, r = bounds(view.region)
+        reset!(cam, Camera(; center = c, radius = r))
+    end
+    CImGui.SameLine()
+    let v = Ref(params.flymode)
+        (@c CImGui.Checkbox("WASD mode", &v[])) && (params.flymode = v[])
+    end
+    CImGui.SetItemTooltip("W/S forward·back   A/D strafe   Space/C up·down   Shift sprint   drag to look")
+    if params.flymode
+        CImGui.SameLine(); CImGui.SetNextItemWidth(hw)
+        _, r = bounds(view.region)
+        let v = Ref(Cfloat(params.fly_speed))
+            (@c CImGui.SliderFloat("##flyspeed", &v[], Cfloat(r / 2000), Cfloat(r / 20),
+                                   "fly speed: %.4f", CImGui.ImGuiSliderFlags_Logarithmic)) &&
+                (params.fly_speed = v[])
+        end
+    end
+    nothing
+end
+
+# The Rendering + Transfer-function sections. Built per field kind: color (RGBA) fields omit the mode
+# selector + Transfer-function section and render DVR-only.
+function _volume_controls!(view::FieldView, hw)
+    params = view.params; tf = view.tf
     tf_field = uses_transfer_function(view.field)
 
     CImGui.SeparatorText("Rendering")
@@ -129,29 +161,4 @@ function ShowControls(view::FieldView)
         end
         _tf_colorbar!(tf, CImGui.GetContentRegionAvail().x)
     end
-
-    CImGui.SeparatorText("View")
-    let sel = _radio_row("proj", (("perspective", nothing), ("ortho", nothing)),
-                         cam.projection === :perspective ? 0 : 1)
-        sel !== nothing && (cam.projection = sel == 0 ? :perspective : :ortho)
-    end
-    if CImGui.Button("reset view")
-        c, r = bounds(view.region)
-        reset!(cam, Camera(; center = c, radius = r))
-    end
-    CImGui.SameLine()
-    let v = Ref(params.flymode)
-        (@c CImGui.Checkbox("WASD mode", &v[])) && (params.flymode = v[])
-    end
-    CImGui.SetItemTooltip("W/S forward·back   A/D strafe   Space/C up·down   Shift sprint   drag to look")
-    if params.flymode
-        CImGui.SameLine(); CImGui.SetNextItemWidth(hw)
-        _, r = bounds(view.region)
-        let v = Ref(Cfloat(params.fly_speed))
-            (@c CImGui.SliderFloat("##flyspeed", &v[], Cfloat(r / 2000), Cfloat(r / 20),
-                                   "fly speed: %.4f", CImGui.ImGuiSliderFlags_Logarithmic)) &&
-                (params.fly_speed = v[])
-        end
-    end
-    nothing
 end

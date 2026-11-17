@@ -80,8 +80,9 @@ _default_region(field) = region(field)   # avoids the `region` accessor being sh
 
 # A single interactive field view: the field + region + camera + params + transfer function + overlays,
 # plus its own GL resources (built lazily on the first `render!`, in whatever context is then current).
+# `field = nothing` is a view of the overlays alone: no volume, and `region` must be given (it frames the camera).
 mutable struct FieldView
-    field
+    field                                 # a FieldSource, or nothing for no volume
     region::Region
     camera::Camera
     params::RenderParams
@@ -98,7 +99,7 @@ function FieldView(field; overlays = Overlay[], colormap::Symbol = :viridis,
     c, r = bounds(region)
     cam = Camera(; center = c, radius = r)
     tf = TransferFunction(; colormap = colormap)
-    default_window!(tf, value_range(field))
+    isnothing(field) || default_window!(tf, value_range(field))
     params = RenderParams(; fly_speed = r / 200)
     FieldView(field, region, cam, params, tf, Vector{Overlay}(overlays),
               nothing, nothing, nothing, nothing, Ref{Union{Nothing,UInt64}}(nothing))
@@ -109,6 +110,8 @@ end
 # e.g. `view.field = other`. Must be called with a current GL context.
 function _ensure_built!(view::FieldView)
     view.vr === nothing && (view.vr = VolumeRenderer())
+    # no volume: nothing to build; a previous field's program and texture stay, for switching back
+    isnothing(view.field) && return view
     fg = field_glsl_full(view.field); rg = region_glsl(view.region)
     if view.built_for != (fg, rg)
         view.vr.volprog != 0 && GL.glDeleteProgram(view.vr.volprog)
@@ -136,7 +139,7 @@ render_key(view::FieldView, gw, gh, vw, vh) = hash((
     view.camera.fov, view.camera.ortho_half,
     view.params.mode, view.params.interp, view.params.step_scale, view.params.opacity_scale,
     view.params.refine_samples,
-    fingerprint(view.field), fingerprint(view.region),
+    isnothing(view.field) ? nothing : fingerprint(view.field), fingerprint(view.region),
     view.tf.colormap, view.tf.logscale, view.tf.lo, view.tf.hi, view.tf.opacity_pts,
     Tuple(overlay_fingerprint(o) for o in view.overlays),
     gw, gh, vw, vh))
@@ -160,7 +163,7 @@ function render_frame!(view::FieldView, gw, gh, vw, vh)
     key = render_key(view, gw, gh, vw, vh)
     vr = view.vr
     @assert view.params.refine_samples >= 1 "refine_samples must be ≥ 1"
-    nmax = view.params.refine_samples
+    nmax = isnothing(view.field) ? 1 : view.params.refine_samples   # no volume ⇒ no jitter ⇒ one frame is final
     refining = nmax > 1
     # Nothing changed and the target sample count reached → the finished image is already cached.
     key == view.last_key[] && vr.nsamp >= nmax && return refining ? vr.accum_fb.tex : vr.geom_fb.tex
@@ -188,6 +191,33 @@ function render_frame!(view::FieldView, gw, gh, vw, vh)
     GL.glClearColor(0, 0, 0, 1); GL.glClearDepth(1.0)
     GL.glClear(GL.GL_COLOR_BUFFER_BIT | GL.GL_DEPTH_BUFFER_BIT)
     geometry_pass!(view, ctx)
+    isnothing(view.field) || volume_pass!(view, aspect, ivp, gw, gh, vw, vh)
+    vr.nsamp += 1
+
+    # ── Pass 4: fold the freshly composited frame into accum_fb's running average (only while refining) ──
+    if refining
+        GL.glBindFramebuffer(GL.GL_FRAMEBUFFER, vr.accum_fb.fbo); GL.glViewport(0, 0, gw, gh)
+        GL.glDisable(GL.GL_SCISSOR_TEST); GL.glDisable(GL.GL_CULL_FACE); GL.glDisable(GL.GL_DEPTH_TEST)
+        GL.glUseProgram(vr.compprog); GL.glBindVertexArray(vr.vao)
+        bind_sampler(vr.compprog, "volTex", 0, GL.GL_TEXTURE_2D, vr.geom_fb.tex)
+        if vr.nsamp == 1
+            GL.glDisable(GL.GL_BLEND)                          # first frame: overwrite (also clears stale float)
+        else
+            GL.glEnable(GL.GL_BLEND)                           # accum ← mix(accum, frame, 1/n): equal-weight mean
+            GL.glBlendColor(0f0, 0f0, 0f0, 1f0 / vr.nsamp)
+            GL.glBlendFunc(GL.GL_CONSTANT_ALPHA, GL.GL_ONE_MINUS_CONSTANT_ALPHA)
+        end
+        GL.glDrawArrays(GL.GL_TRIANGLES, 0, 3)
+        GL.glDisable(GL.GL_BLEND)
+    end
+
+    GL.glBindFramebuffer(GL.GL_FRAMEBUFFER, prev_fbo[])
+    refining ? vr.accum_fb.tex : vr.geom_fb.tex
+end
+
+# Passes 2–3: march the field (low-res), clipped at the geometry depth, then composite it over the G-buffer.
+function volume_pass!(view::FieldView, aspect, ivp, gw, gh, vw, vh)
+    vr = view.vr
 
     # ── Pass 2: volume march (low-res), clipped at the geometry depth ──
     GL.glBindFramebuffer(GL.GL_FRAMEBUFFER, vr.vol_fb.fbo); GL.glViewport(0, 0, vw, vh)
@@ -217,27 +247,6 @@ function render_frame!(view::FieldView, gw, gh, vw, vh)
     bind_sampler(vr.compprog, "volTex", 0, GL.GL_TEXTURE_2D, vr.vol_fb.tex)
     GL.glDrawArrays(GL.GL_TRIANGLES, 0, 3)
     GL.glDisable(GL.GL_BLEND)
-    vr.nsamp += 1
-
-    # ── Pass 4: fold the freshly composited frame into accum_fb's running average (only while refining) ──
-    if refining
-        GL.glBindFramebuffer(GL.GL_FRAMEBUFFER, vr.accum_fb.fbo); GL.glViewport(0, 0, gw, gh)
-        GL.glDisable(GL.GL_SCISSOR_TEST); GL.glDisable(GL.GL_CULL_FACE); GL.glDisable(GL.GL_DEPTH_TEST)
-        GL.glUseProgram(vr.compprog); GL.glBindVertexArray(vr.vao)
-        bind_sampler(vr.compprog, "volTex", 0, GL.GL_TEXTURE_2D, vr.geom_fb.tex)
-        if vr.nsamp == 1
-            GL.glDisable(GL.GL_BLEND)                          # first frame: overwrite (also clears stale float)
-        else
-            GL.glEnable(GL.GL_BLEND)                           # accum ← mix(accum, frame, 1/n): equal-weight mean
-            GL.glBlendColor(0f0, 0f0, 0f0, 1f0 / vr.nsamp)
-            GL.glBlendFunc(GL.GL_CONSTANT_ALPHA, GL.GL_ONE_MINUS_CONSTANT_ALPHA)
-        end
-        GL.glDrawArrays(GL.GL_TRIANGLES, 0, 3)
-        GL.glDisable(GL.GL_BLEND)
-    end
-
-    GL.glBindFramebuffer(GL.GL_FRAMEBUFFER, prev_fbo[])
-    refining ? vr.accum_fb.tex : vr.geom_fb.tex
 end
 
 # Public L1 entry point: render the view at `w`×`h` device pixels; returns the color texture to display

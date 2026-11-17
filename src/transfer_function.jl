@@ -11,12 +11,12 @@ mutable struct TransferFunction
     opacity_pts::Vector{SVector{2,Float64}}   # (value∈[0,1], opacity∈[0,1]), kept sorted by value
     logscale::Bool
     lo::Float64; hi::Float64                   # value-normalization window (log10 units if logscale)
-    tex::UInt32
+    tex::UInt32                                # 0 until the first bake: construction needs no GL context
     dirty::Bool
 end
 
 function TransferFunction(; colormap = :viridis, logscale = false, lo = 0.0, hi = 1.0)
-    TransferFunction(colormap, [SVector(0.0, 0.0), SVector(1.0, 1.0)], logscale, lo, hi, tex_tf(), true)
+    TransferFunction(colormap, [SVector(0.0, 0.0), SVector(1.0, 1.0)], logscale, lo, hi, 0, true)
 end
 
 # Piecewise-linear opacity at normalized value t∈[0,1] (clamped to the end points).
@@ -50,6 +50,7 @@ function bake!(tf::TransferFunction)
         c = get(scheme, t)
         data[:, i] .= (Float32(c.r), Float32(c.g), Float32(c.b), Float32(opacity_at(tf, t)))
     end
+    tf.tex == 0 && (tf.tex = tex_tf())
     update_tf!(tf.tex, data)
     tf.dirty = false
     tf
