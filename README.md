@@ -34,72 +34,19 @@ The host's GL context must be OpenGL 4.1 core: pass `opengl_version = v"4.1"` to
 
 `ShowView` fills the current content region with the rendered view and turns mouse/keyboard into camera motion: drag to orbit, right/middle drag to pan, wheel to zoom; with `view.flymode = true`, drag looks around and WASD/Space/C fly. There is no window or render-loop boilerplate of our own — you drive the ImGui frame like you already do for any other widget.
 
-Everything is explicit: a colour is a `Colormap` (a `ColorScheme` object and a value window) applied to a field through `Mapped`, a volume always has a `region`, a view always has a `camera`. Marks, fields and views are plain data; nothing touches the GPU until the first render. With a current OpenGL context, `render_image(view, w, h)` renders a view into an image matrix without any UI. Other hosts call `render!(view, w, h)`, which returns the GL texture to display, and drive the camera with `orbit!`, `pan!`, `zoom!(cam, factor, view.initial_camera)`, `fly!`; `reset!(view)` restores the initial camera, `free!(view)` releases GL resources.
+# Concepts
 
-# Scalar fields
+A `View` draws a list of marks through a camera:
 
-## Rectilinear grid
+- `Volume(color; region)` ray-marches a field through a shape;
+- `Surface(shape; color, opacity)` draws the surface of a shape;
+- `Lines(polylines; color, width_px)` draws polylines.
 
-`GridField` wraps a `KeyedArray`; its dim names choose the coordinates — `(x, y, z)` for a Cartesian grid, `(lon, lat)` (radians, or Unitful angles) for a field on directions from the origin, e.g. to colour a sphere:
+Fields are functions of 3D position evaluated on the GPU. `GridField` samples a `KeyedArray` whose dim names choose the coordinates: `(x, y, z)`, or `(lon, lat)` for a field on directions from the origin, e.g. to colour a sphere. `GLSLField` is written directly in GLSL. A grid of colours is a colour field (rgb = emission, alpha = extinction). Shapes are `Sphere`, `Box` and `Plane`.
 
-```julia
-xs = ys = zs = -1:0.02:1
-grid = GridField(KeyedArray([exp(-(x^2 + y^2 + z^2) / 0.1) for x in xs, y in ys, z in zs]; x = xs, y = ys, z = zs);
-                 interpolation = :linear)   # or :nearest
-Box(grid)          # the box of the keys, a natural Volume region
-value_range(grid)  # data range, to build a Colormap window from
-```
+A mark's `color` is a constant colour, per-vertex colours (`Lines`), a colour field, or a `Mapped`: a scalar field or per-vertex values through a `Colormap` (a `ColorScheme` and a value window).
 
-An RGBA-valued grid is a colour field (rgb = emission, alpha = extinction) and is used directly as a volume's colour: `Volume(grid; region = Box(grid))`, see [milkyway.jl](examples/milkyway.jl).
-
-For a non-uniform axis, define one method — `VolumeRendering.axis_index_glsl(k::MyAxis, coord)` returning the GLSL expression that maps a world coordinate to a fractional cell index — and your axis type works inside a `KeyedArray` like any range.
-
-## Analytic
-
-`GLSLField` is a field defined directly in GLSL, optionally with textures and uniforms:
-
-```julia
-f = GLSLField("""
-        float value(vec3 p) { return exp(-dot(p, p) * k); }
-        float stepSize(vec3 p) { return 0.05; }
-        """;
-    uniforms = (; k = 0.7))
-vol = Volume(Mapped(f, Colormap(ColorSchemes.magma, value_range(f))); region = Sphere(radius = 3.0))   # value_range defaults to 0..1
-```
-
-`GLSLField(...; kind = :color)` with `vec4 value(vec3 p)` is an analytic RGBA field.
-
-## Custom field
-
-Any type is a field when it implements the field interface — extend the functions qualified, `VolumeRendering.field_glsl(f::MyField) = ...` etc. (likewise for shapes):
-
-```julia
-field_glsl(f)    # GLSL defining `float value(vec3 p)` (or `vec4` for a colour field) and `float stepSize(vec3 p)`
-value_kind(f)    # :scalar | :color
-textures(f)      # optional, NamedTuple of name => Texture(array; wrap, filter); declared as samplers for you
-uniforms(f)      # optional, NamedTuple of name => value (numbers, SVectors, SMatrices); declared for you
-value_range(f)   # optional, for building a colormap window
-VolumeRendering.controls!(f)   # optional, ImGui widgets for the field's own settings
-```
-
-Store the arrays inside `f` and return the same objects from `textures(f)` each time: they are uploaded once and cached by identity.
-
-# Custom shapes
-
-Volume regions and surfaces are shapes: `Sphere`, `Box`, `Plane` (the parallelogram `Plane(origin, u, v)`; `Plane(:z, 0.0, box)` is the slice of `box` at `z = 0`), or any type implementing
-
-```julia
-shape_glsl(s)   # GLSL defining `vec2 vr_hit(vec3 ro, vec3 rd)`: entry and exit ray parameters (tfar < tnear on a miss)
-uniforms(s)     # optional, as for fields
-bounds(s)       # (; center, radius), an enclosing sphere: `Camera(; bounds(s)...)` frames it
-aabb(s)         # (; lo, hi), an axis-aligned bounding box
-```
-
-Shapes must be convex.
-
-# Marks
-
-A view draws a list of marks:
+Helpers return polylines for `Lines`: `box_edges`, `graticule`, `on_sphere`, `axis_lines`, and `streamlines` and `glyphs` of a `VectorField`. Each of these has a docstring with the details.
 
 ```julia
 using StaticArrays, ColorTypes, IntervalSets
@@ -115,25 +62,24 @@ view = View([
 ]; camera = Camera(; bounds(box)...))
 ```
 
-A mark's `color` is a constant colour, per-vertex colours (`Lines`), a colour field, or a `Mapped` — a scalar field or per-vertex values through a `Colormap`. Helpers return polylines for `Lines`: `box_edges(box)`, `graticule(sphere; parallels, meridians)` (each a count or explicit angles, radians or Unitful), and `on_sphere(curves, sphere)` for curves given as directions from a sphere's centre (both scaled out just enough that no segment dips inside the sphere; draw them on a slightly larger sphere than an opaque one to avoid depth ties). Opaque marks are depth-tested; translucent ones (volumes, surfaces with `opacity < 1`) are composited in list order. Coloured x/y/z axes: `ax = axis_lines(center, radius); Lines(ax.polylines; color = ax.colors)`.
-
-# Vector fields
-
-A `VectorField` wraps a Julia function `p -> v` over a box. `streamlines` integrates evenly spaced field lines, `glyphs` subsamples them into arrows; both are drawn as `Lines`, coloured by magnitude:
-
-```julia
-vf = VectorField(p -> SVector(-p[2], p[1], 0.2); region = Box(-1..1, -1..1, -1..1))
-s = streamlines(vf)
-g = glyphs(s; every = 8)
-speed = Colormap(ColorSchemes.viridis, value_range(s.values))
-marks = [Lines(s.polylines; color = Mapped(s.values, speed)),
-         Lines(g.polylines; color = Mapped(g.values, speed))]
-```
+Opaque marks are depth-tested; translucent ones (volumes, surfaces with `opacity < 1`) are composited in list order.
 
 # Updating
 
-Marks, fields, colormaps, `Mapped`, the camera and the view are mutable and read every frame: setting a property is the whole update protocol (`cmap.window = 0.1..2.0`, `vol.mode = :mip`, `grid.data = A2`, `mapped.source = other_field`), and the view re-renders only when something changed. Bulk arrays (grid data, textures, polylines, per-vertex colours/values) are tracked by identity — assign new arrays, never mutate them in place. Shared objects are shared by reference — mutate them (`mapped.source = f`) to update every mark using them; to show or hide a mark, add or remove it from `view.marks`.
+Marks, fields, colormaps, `Mapped`, the camera and the view are plain mutable data, read every frame; nothing touches the GPU until the first render. Setting a property is the whole update protocol (`cmap.window = 0.1..2.0`, `vol.mode = :mip`, `grid.data = A2`, `mapped.source = other_field`), and the view re-renders only when something changed. Bulk arrays (grid data, textures, polylines, per-vertex colours/values) are tracked by identity — assign new arrays, never mutate them in place. Shared objects are shared by reference — mutate them (`mapped.source = f`) to update every mark using them. To show or hide a mark, add or remove it from `view.marks`.
 
-# UI
+# Extending
 
-Right-click the view to open its controls: projection, camera reset, fly mode, render quality, and per-mark, per-field and per-colormap settings (volume mode, density, extinction curve editor, opacity, line width, interpolation, colour scheme, log scale and window). `VolumeRendering.ShowControls(view)` emits the same panel into any ImGui window.
+A field is any type that supplies its GLSL: implement `field_glsl` — defining `float value(vec3 p)` (or `vec4` for a colour field) and `float stepSize(vec3 p)` — and `value_kind`; optionally `textures`, `uniforms`, `value_range`, `controls!`. A shape is any convex type implementing `shape_glsl` (its ray hit), `bounds` and `aabb`. See their docstrings for the details. For a one-off field, `GLSLField` needs no new type:
+
+```julia
+f = GLSLField("""
+        float value(vec3 p) { return exp(-dot(p, p) * k); }
+        float stepSize(vec3 p) { return 0.05; }
+        """; uniforms = (; k = 0.7))
+```
+
+# Examples
+
+- [demo.jl](examples/demo.jl): a volume in a complete Dear ImGui program.
+- [milkyway.jl](examples/milkyway.jl): an RGBA colour volume reshaped live by sliders; it needs the OpenSpace Milky Way volume, see the file's header for the download.
