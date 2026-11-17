@@ -96,7 +96,7 @@ surface_body(t) = """
 
 const VOLUME_DECLS = """
     uniform ivec2 vr_scene_size, vr_vol_size;
-    uniform int vr_sample;
+    uniform int vr_sample, vr_max_samples;
     uniform float vr_step_scale, vr_density;
     uniform sampler2D vr_scene_depth;
     """
@@ -120,10 +120,16 @@ const VOLUME_MODES = (
 
 volume_body(mode::Symbol) = let (; init, step, out) = VOLUME_MODES[mode]
     """
+    // the field's step at p, floored at dt_min; a comparison, not max(), so a NaN or non-positive step takes the floor too
+    float vr_step(vec3 p, float dt_min) { float dt = vr_step_scale * stepSize(p); return dt > dt_min ? dt : dt_min; }
     void main() {
         vec3 ro, rd; vr_ray(gl_FragCoord.xy / vr_viewport * 2.0 - 1.0, ro, rd);
         vec2 tr = vr_hit(ro, rd);
         float tn = max(tr.x, 0.0), tfar = tr.y;   // the region may start behind the eye
+        // every step is at least span / vr_max_samples, so the march crosses the region within vr_max_samples samples: a
+        // ray that would need more is coarsened, not cut short. The span is before scene-depth clipping, so an opaque mark
+        // in front does not change the sampling behind it
+        float dt_min = (tfar - tn) / float(vr_max_samples);
         // clip at the nearest scene depth over this cell's full-res footprint, so sub-cell-thin lines are not missed
         ivec2 fc = ivec2(gl_FragCoord.xy);
         ivec2 b0 = fc * vr_scene_size / vr_vol_size, b1 = (fc + 1) * vr_scene_size / vr_vol_size;
@@ -135,12 +141,13 @@ volume_body(mode::Symbol) = let (; init, step, out) = VOLUME_MODES[mode]
         if (tfar <= tn) { vr_frag = vec4(0.0); return; }   // missed or fully clipped
         // entry jitter: van der Corput over refinement frames, rotated per pixel
         float vdc = float(bitfieldReverse(uint(vr_sample))) * 2.3283064365386963e-10;
-        float t = tn + fract(vdc + vr_hash12(uvec2(gl_FragCoord.xy))) * (vr_step_scale * stepSize(ro + rd * tn));
+        float t = tn + fract(vdc + vr_hash12(uvec2(gl_FragCoord.xy))) * vr_step(ro + rd * tn, dt_min);
         if (t >= tfar) { vr_frag = vec4(0.0); return; }   // no sample: like a miss
         $init
-        for (int s = 0; s < 2048 && t < tfar; s++) {
+        // the count bound only guards against float rounding: the step floor already ends the march within the budget
+        for (int s = 0; s < vr_max_samples && t < tfar; s++) {
             vec3 pos = ro + rd * t;
-            float dt = vr_step_scale * stepSize(pos);
+            float dt = vr_step(pos, dt_min);
             $step
             t += dt;
         }
@@ -387,7 +394,7 @@ function assemble(m::Volume, (; camera, w, h, vsize, sample))
                                                   extinction = mapped_extinction(m.color, m),
                                                   engine_units = [attachment_unit(:vr_scene_depth, c -> c.scene_fb.depth, :nearest)])
     engine = (; vr_rect = FULLSCREEN, vr_viewport = SVector(float.(vsize)...), vr_scene_size = SVector(w, h), vr_vol_size = SVector(vsize...),
-                vr_sample = sample, vr_step_scale = m.step_scale, vr_density = m.density)
+                vr_sample = sample, vr_max_samples = m.max_samples, vr_step_scale = m.step_scale, vr_density = m.density)
     [:march => Draw(RECT_VERT, frag, merge(frame_uniforms(camera, w, h), uniforms, engine), units, nothing),
      :composite => blit(attachment_unit(:vr_src, c -> c.vol_fb.color, :linear), w, h)]
 end

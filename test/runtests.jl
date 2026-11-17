@@ -537,8 +537,8 @@ end
     pl = [[SVector(0.0, 0, 0), SVector(1.0, 0, 0)], [SVector(0.0, 1, 0), SVector(1.0, 1, 0), SVector(1.0, 2, 0)]]
 
     v = Volume(m; region = box, label = "v")
-    @test (v.color, v.region, v.extinction, v.mode, v.density, v.step_scale, v.label) ==
-          (m, box, [[0, 0], [1, 1]], :dvr, 1.0, 0.5, "v")
+    @test (v.color, v.region, v.extinction, v.mode, v.density, v.step_scale, v.max_samples, v.label) ==
+          (m, box, [[0, 0], [1, 1]], :dvr, 1.0, 0.5, 4096, "v")
     @test Volume(rgba; region = Sphere(radius = 1)).color === rgba
     @test Volume(m; region = box, mode = :mip).mode === :mip
     @test_throws "requires a Mapped" Volume(rgba; region = box, mode = :mip)            # MIP on a colour field
@@ -553,6 +553,8 @@ end
     @test_throws "0..1" Volume(m; region = box, extinction = [SVector(0.0, 0.0), SVector(1.0, 2.0)])
     @test_throws "density" Volume(m; region = box, density = 0)
     @test_throws "step_scale" Volume(m; region = box, step_scale = -1)
+    @test_throws "max_samples" Volume(m; region = box, max_samples = 0)
+    @test_throws "max_samples" Volume(m; region = box, max_samples = 2^31)
     @test Volume(rgba; region = box, extinction = SVector{2,Float64}[]).extinction == []   # only for Mapped colours
 
     s = Surface(Sphere(radius = 1))
@@ -684,6 +686,7 @@ end
     @test !same(() -> sc.g.interpolation = :nearest)
     @test !same(() -> sc.vol.extinction[2] = SVector(1.0, 0.5))     # by value, also in place
     @test !same(() -> sc.vol.region = Box(0..1, 0..1, 0..1))
+    @test !same(() -> sc.vol.max_samples = 100)
     @test !same(() -> sc.sl.shape = Plane(:z, 3, sc.vol.region))
     @test !same(() -> sc.sl.opacity = 0.5)
     @test !same(() -> orbit!(sc.view.camera, 0.1, 0))
@@ -1283,7 +1286,7 @@ end
 
 @testitem "Volume: march accuracy, LUTs, clipping" setup = [GLContext] begin
     import ModernGL as GL, VolumeRendering as VR
-    using StaticArrays, ColorTypes, FixedPointNumbers, ColorSchemes, IntervalSets
+    using StaticArrays, ColorTypes, FixedPointNumbers, ColorSchemes, IntervalSets, AxisKeys
     top = GLContext.topcam()
     gray(c) = float(c.r)
     constant(v; step = 0.1) = GLSLField("float value(vec3 p) { return k; } float stepSize(vec3 p) { return $step; }"; uniforms = (; k = v))
@@ -1302,6 +1305,31 @@ end
                                    extinction = flat, density = 2.0)]; camera = inside), 32, 32)
     @test gray(im[16, 16]) ≈ 1 - exp(-1) atol = 0.01
     @test gray(im[1, 1]) > gray(im[16, 16]) + 0.05
+
+    # max_samples coarsens a long march, never cuts it short: MIP and average of p.z along a 10-deep box reach its far end
+    # and its mean whatever the step — tiny, zero, negative or NaN (a NaN uniform: GLSL has no NaN literal)
+    depth = Box(-1..1, -1..1, 0..10)
+    zview(step, max_samples, mode) = View([Volume(Mapped(GLSLField("float value(vec3 p) { return p.z; } float stepSize(vec3 p) { return k; }";
+                                                                   uniforms = (; k = step)), Colormap(ColorSchemes.gray1, 0..10));
+                                                  region = depth, mode, step_scale = 1.0, max_samples, extinction = [SVector(0.0, 1.0), SVector(1.0, 1.0)])];
+                                          camera = GLContext.topcam(; eye = -1.0), refine_frames = 1)
+    for step in (0.01, 1e-4, 0.0, -1.0, NaN), max_samples in (4096, 100)
+        @test all(c -> isapprox(10gray(c), 10; atol = 10 / max_samples + 0.05), render_image(zview(step, max_samples, :mip), 8, 8))
+        @test all(c -> isapprox(10gray(c), 5; atol = 10 / max_samples + 0.05), render_image(zview(step, max_samples, :average), 8, 8))
+    end
+    # and a coarsened DVR march keeps the exact opacity law
+    @test all(c -> isapprox(gray(c), 1 - exp(-1); atol = 0.01),
+              render_image(View([Volume(Mapped(constant(1.0; step = 1e-6), Colormap(ColorSchemes.gray1, 0..1)); region = Box(-0.5..0.5, -0.5..0.5, -0.5..0.5),
+                                        extinction = flat, density = 2.0, max_samples = 64)]; camera = top), 32, 32)[9:24, 9:24])
+
+    # (lon, lat) region through the origin, where the step shrinks to 0: alpha = 1 - exp(-σ·chord) on every ray
+    ll = GridField(KeyedArray(ones(5, 8); lat = range(-π/2, π/2, 5), lon = range(0, 2π * 7/8, 8)))
+    llimg = render_image(View([Volume(Mapped(ll, Colormap(ColorSchemes.gray1, 0..1)); region = Sphere(radius = 1.0), density = 0.5,
+                                    extinction = [SVector(0.0, 1.0), SVector(1.0, 1.0)], step_scale = 0.1)]; camera = top), 32, 32)
+    chord_alpha(row, col) = let (x, y) = GLContext.pixel_xy(1.0, 32, row, col)
+        x^2 + y^2 < 0.95 ? 1 - exp(-sqrt(1 - x^2 - y^2)) : nothing
+    end
+    @test all(I -> (a = chord_alpha(Tuple(I)...); isnothing(a) || isapprox(gray(llimg[I]), a; atol = 0.01)), CartesianIndices(llimg))
 
     # a ray that hits the region but takes no sample (step ≫ slab) is a miss: the white background shows
     thin = Box(-0.5..0.5, -0.5..0.5, -0.01..0.01)

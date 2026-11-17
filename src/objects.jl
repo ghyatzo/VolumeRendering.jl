@@ -117,7 +117,7 @@ nan_extrema(itr) = ((lo, hi) = extrema(Iterators.filter(!isnan, itr)); convert(F
 A field sampled from a grid. Dim names choose the coordinates, in any order:
 - `(x, y, z)`: Cartesian; [`Box(g)`](@ref Box) is the box of its keys;
 - `(lon, lat)`: directions from the origin, in radians (or dimensionless Unitful angles); longitude wraps around.
-  As a Volume source its region must exclude the origin, where the march step shrinks to 0.
+  The march step is proportional to the distance from the origin; near it, the Volume's `max_samples` floors the step.
 
 Axis keys are `Real` ranges; other axis types need an [`axis_index_glsl`](@ref) method. `Real` elements make a
 `:scalar` field; `Colorant` elements a `:color` field (rgb emission, alpha extinction). `interpolation` is `:linear` or

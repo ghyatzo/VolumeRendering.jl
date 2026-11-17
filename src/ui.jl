@@ -184,6 +184,12 @@ function controls!(m::Volume)
     end
     CImGui.SetNextItemWidth(hw)
     slider!(m, :step_scale, "##stepscale", 1e-3, 1e3, "step scale: %.4g"; log = true)
+    CImGui.SameLine(); CImGui.SetNextItemWidth(hw)
+    let v = Ref(Cint(m.max_samples))
+        (@c CImGui.SliderInt("##maxsamples", &v[], 16, 65536, "max samples: %d",
+                             CImGui.ImGuiSliderFlags_AlwaysClamp | CImGui.ImGuiSliderFlags_Logarithmic)) && (m.max_samples = v[])
+    end
+    CImGui.SetItemTooltip("most samples per ray: a ray that needs more is sampled more coarsely, not cut short")
     mapped && extinction_editor!(m)
 end
 

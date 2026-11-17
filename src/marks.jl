@@ -54,7 +54,8 @@ color_kind(m::Mapped) = (validate(m); source_kind(m.source) === :values ? :mappe
 color_kind(f) = isfield(f) && value_kind(f) === :color ? :color_field :
     throw(ArgumentError("a mark colour must be a Color, per-vertex Colors, a :color field or a Mapped; got $(summary(f))"))
 
-"""    Volume(color; region, extinction = [SVector(0.0, 0.0), SVector(1.0, 1.0)], mode = :dvr, density = 1.0, step_scale = 0.5, label = nothing)
+"""    Volume(color; region, extinction = [SVector(0.0, 0.0), SVector(1.0, 1.0)], mode = :dvr, density = 1.0, step_scale = 0.5,
+           max_samples = 4096, label = nothing)
 
 A mark ray-marching `color` through the shape `region`. `color` is a [`Mapped`](@ref) scalar field or a `:color`
 field.
@@ -65,6 +66,8 @@ field.
   `(u, σ)` points sorted in `u`, all coordinates in `0..1`; at least two. A `:color` field brings its own σ (alpha).
 - `density`: σ scale (DVR).
 - `step_scale`: the march step is `step_scale × stepSize(p)` of the field.
+- `max_samples`: the most samples a ray takes through the region: the step is at least the ray's path length through the region (in front of the eye)
+  divided by `max_samples`.
 - `label`: the mark's title in the controls panel.
 
 A volume is translucent: composited over the opaque marks in list order with other translucent marks, unsorted.
@@ -77,10 +80,11 @@ Base.@kwdef mutable struct Volume
     mode::Symbol = :dvr
     density::Float64 = 1.0
     step_scale::Float64 = 0.5
+    max_samples::Int = 4096
     label::Union{Nothing,String} = nothing
 
-    Volume(color, region, extinction, mode, density, step_scale, label) =
-        validate(new(color, region, extinction, mode, density, step_scale, label))
+    Volume(color, region, extinction, mode, density, step_scale, max_samples, label) =
+        validate(new(color, region, extinction, mode, density, step_scale, max_samples, label))
 end
 Volume(color; kw...) = Volume(; color, kw...)
 
@@ -133,6 +137,7 @@ function validate(m::Volume)
     check_shape(m.region, "a Volume region")
     m.density > 0 || throw(ArgumentError("Volume density must be positive, got $(m.density)"))
     m.step_scale > 0 || throw(ArgumentError("Volume step_scale must be positive, got $(m.step_scale)"))
+    1 <= m.max_samples <= typemax(Int32) || throw(ArgumentError("Volume max_samples must be in 1..$(typemax(Int32)), got $(m.max_samples)"))
     kind === :mapped_field && check_extinction(m.extinction)
     m
 end
@@ -221,7 +226,7 @@ snapshot(view::View, w, h) = (w, h, fieldvalues(view.camera)..., view.background
                               view.flymode, view.fly_speed, Tuple(map(snapshot, view.marks)))
 
 # extinction is copied: it is compared by value, so an in-place edit must not change the stored snapshot
-snapshot(m::Volume) = (:Volume, snapshot(m.color), snapshot_shape(m.region), copy(m.extinction), m.mode, m.density, m.step_scale)
+snapshot(m::Volume) = (:Volume, snapshot(m.color), snapshot_shape(m.region), copy(m.extinction), m.mode, m.density, m.step_scale, m.max_samples)
 snapshot(m::Surface) = (:Surface, snapshot_shape(m.shape), snapshot(m.color), m.opacity)
 snapshot(m::Lines) = (:Lines, Identity(m.polylines), snapshot(m.color), m.width_px)
 
