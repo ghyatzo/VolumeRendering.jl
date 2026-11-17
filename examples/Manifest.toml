@@ -92,10 +92,10 @@ version = "0.5.0"
 
 [[deps.CImGui]]
 deps = ["CEnum", "CImGuiPack_jll", "CSyntax", "DocStringExtensions", "PrecompileTools", "Printf", "Statistics"]
-git-tree-sha1 = "b93684488620e697130dd5bd88f682d7fbd98007"
+git-tree-sha1 = "220cead22cf4f32e7ee6b49bc896b67fcfbc1362"
 registries = "General"
 uuid = "5d785b6c-b76f-510e-a07c-3070796c7e87"
-version = "9.1.2"
+version = "10.1.2"
 
     [deps.CImGui.extensions]
     GlfwOpenGLBackend = ["GLFW", "ModernGL"]
@@ -108,10 +108,10 @@ version = "9.1.2"
 
 [[deps.CImGuiPack_jll]]
 deps = ["Artifacts", "FreeType2_jll", "GLFW_jll", "JLLWrappers", "Libdl"]
-git-tree-sha1 = "148ff87544fba1a78fedd4f2dc593423e1a48437"
+git-tree-sha1 = "fdf299faaabfe75bb97b9b47cf95e0867ef8ece8"
 registries = "General"
 uuid = "333409e9-af72-5310-9767-d6ad21a76a05"
-version = "0.13.1+0"
+version = "0.14.0+0"
 
 [[deps.CSyntax]]
 deps = ["CEnum"]
@@ -149,10 +149,10 @@ version = "0.12.5"
 
 [[deps.ColorVectorSpace]]
 deps = ["ColorTypes", "FixedPointNumbers", "LinearAlgebra", "Requires", "Statistics", "TensorCore"]
-git-tree-sha1 = "96fce5c80e0834e96ab6d24fb384fd945c9cb2d4"
+git-tree-sha1 = "1b26bfe1e23b0fbf350ef5e37a8608caeeafd9de"
 registries = "General"
 uuid = "c3611d14-8923-5661-9e6a-0046d554d3a4"
-version = "0.11.2"
+version = "0.11.3"
 
     [deps.ColorVectorSpace.extensions]
     SpecialFunctionsExt = "SpecialFunctions"
@@ -194,6 +194,12 @@ weakdeps = ["IntervalSets", "LinearAlgebra", "StaticArrays"]
     ConstructionBaseLinearAlgebraExt = "LinearAlgebra"
     ConstructionBaseStaticArraysExt = "StaticArrays"
 
+[[deps.Contour]]
+git-tree-sha1 = "439e35b0b36e2e5881738abc8857bd92ad6ff9a8"
+registries = "General"
+uuid = "d38c429a-6771-53c6-b99e-75d170b6e991"
+version = "0.6.3"
+
 [[deps.DataAPI]]
 git-tree-sha1 = "abe83f3a2f1b857aac70ef8b269080af17764bbe"
 registries = "General"
@@ -219,10 +225,10 @@ uuid = "ee1fde0b-3d02-5ea6-8484-8dfef6360eab"
 version = "1.16.2+0"
 
 [[deps.DocStringExtensions]]
-git-tree-sha1 = "7442a5dfe1ebb773c29cc2962a8980f47221d76c"
+git-tree-sha1 = "38ef52f18cbdfa783ec6c25acc23fb1e8525ec16"
 registries = "General"
 uuid = "ffbed154-4ef7-542d-bbb7-c09d3a79fcae"
-version = "0.9.5"
+version = "0.10.2"
 
 [[deps.EpollShim_jll]]
 deps = ["Artifacts", "JLLWrappers", "Libdl"]
@@ -264,11 +270,15 @@ version = "0.4.20"
     Symbolics = "0c5d862f-8b57-4792-8d23-62f2024744c7"
 
 [[deps.FixedPointNumbers]]
-deps = ["Random", "Statistics"]
-git-tree-sha1 = "59af96b98217c6ef4ae0dfe065ac7c20831d1a84"
+deps = ["Random"]
+git-tree-sha1 = "c4ebbf6271b2ea446fd618a2a47eea7254a4e94b"
 registries = "General"
 uuid = "53c48c17-4a7d-5ca2-90c5-79b7896eea93"
-version = "0.8.6"
+version = "0.9.3"
+weakdeps = ["Statistics"]
+
+    [deps.FixedPointNumbers.extensions]
+    FixedPointNumbersStatisticsExt = "Statistics"
 
 [[deps.Fontconfig_jll]]
 deps = ["Artifacts", "Bzip2_jll", "Expat_jll", "FreeType2_jll", "JLLWrappers", "Libdl", "Libuuid_jll", "Zlib_jll"]
@@ -293,10 +303,10 @@ version = "1.0.19+0"
 
 [[deps.GLFW]]
 deps = ["GLFW_jll"]
-git-tree-sha1 = "af06f66cca2b698ab9c482de55977ff8178d025e"
+git-tree-sha1 = "f16f6d47e3c8f17ef184f6f09ee793dbd2a4c2c0"
 registries = "General"
 uuid = "f7f18e0c-5ee9-5ccd-a5bf-e8befd85ed98"
-version = "3.4.6"
+version = "4.0.0"
 
 [[deps.GLFW_jll]]
 deps = ["Artifacts", "JLLWrappers", "Libdl", "Libglvnd_jll", "Xorg_libXcursor_jll", "Xorg_libXi_jll", "Xorg_libXinerama_jll", "Xorg_libXrandr_jll", "libdecor_jll", "xkbcommon_jll"]
@@ -347,17 +357,17 @@ version = "1.1.1"
 
 [[deps.ImPlot]]
 deps = ["CEnum", "CImGui", "CImGuiPack_jll", "ConstructionBase", "DocStringExtensions"]
-git-tree-sha1 = "e5c0d617f29828e2865c952c67c88b85e2de71f9"
+git-tree-sha1 = "1ded43e9e7b3d7c7509a45310bcd1b4e357cb80e"
 registries = "General"
 uuid = "e8efc688-5342-4ad4-b4ba-9025a731b363"
-version = "0.8.1"
+version = "1.0.0"
 
 [[deps.ImPlotExtra]]
-deps = ["Accessors", "CImGui", "ColorSchemes", "ColorTypes", "FixedPointNumbers", "ImPlot", "IntervalSets", "InverseFunctions", "Printf"]
-git-tree-sha1 = "eb14fa5c40be1fdb5f36d9b94614d184d74ebd67"
-registries = "MyRegistry"
+deps = ["Accessors", "CImGui", "ColorSchemes", "ColorTypes", "Contour", "FixedPointNumbers", "ImPlot", "IntervalSets", "InverseFunctions", "Printf"]
+git-tree-sha1 = "c13c33e1cd74c396d0fa0240606a8cd3d32beb5b"
+registries = "General"
 uuid = "bf2a09a8-fe43-4b24-a47f-d3d0370c11fb"
-version = "0.1.3"
+version = "0.1.4"
 
 [[deps.IntervalSets]]
 git-tree-sha1 = "0db6aea5b64caa1c47e9fdd27394f0296f05e8bf"
@@ -823,7 +833,3 @@ version = "1.13.0+0"
 [registries.General]
 url = "https://github.com/JuliaRegistries/General.git"
 uuid = "23338594-aafe-5451-b93e-139f81909106"
-
-[registries.MyRegistry]
-url = "git@github.com:aplavin/MyRegistry.git"
-uuid = "7330184e-cc21-40e1-ae68-0b1b0d3ee23f"
