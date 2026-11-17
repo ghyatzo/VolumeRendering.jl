@@ -3,16 +3,9 @@
 const ROT_SPEED = 0.007   # rad per pixel of drag
 const ZOOM_SPEED = 0.12   # per mouse-wheel notch
 
-# transient per-view interaction state, kept off the View and collected with it
-mutable struct Drag
-    rotating::Bool
-    panning::Bool
-    controls_open::Bool   # the floating controls window is shown
-    rmb_on_widget::Bool   # the current right-button press started on this image
-    rmb_dragged::Bool     # … and turned into a drag (pan, not a controls toggle)
-end
-const DRAGS = WeakKeyDict{View,Drag}()
-drag_state(view::View) = get!(() -> Drag(false, false, false, false, false), DRAGS, view)
+# whether the floating controls window of a view is shown; kept off the View and collected with it
+const CONTROLS_OPEN = WeakKeyDict{View,Bool}()
+controls_open(view::View) = get(CONTROLS_OPEN, view, false)
 
 # ImGui IDs from the object itself, so a shared object keeps one widget state wherever it appears
 push_id(x) = CImGui.PushID(Ptr{Cvoid}(objectid(x)))
@@ -32,42 +25,42 @@ function ShowView(view::View; size::ImVec2 = ImVec2(-CImGui.FLT_MIN, -CImGui.FLT
     fbs = unsafe_load(CImGui.GetIO().DisplayFramebufferScale)
     tex = render!(view, max(1, round(Int, dw * fbs.x)), max(1, round(Int, dh * fbs.y)))   # device px
     push_id(view)
-    CImGui.Image(CImGui.ImTextureRef(CImGui.ImTextureID(UInt64(tex))), ImVec2(dw, dh), ImVec2(0, 1), ImVec2(1, 0))   # GL rows are bottom-up
-    camera_input!(view, CImGui.IsItemHovered(), dw, dh)
+    # an invisible button is the interactive item, the image is drawn into its rect: holding it takes the mouse
+    # (no window move, no other widget reacting), and IsItemHovered/IsItemActive give the hover/drag state
+    clicked = CImGui.InvisibleButton("view", ImVec2(dw, dh), CImGui.ImGuiButtonFlags_MouseButtonLeft |
+                                     CImGui.ImGuiButtonFlags_MouseButtonRight | CImGui.ImGuiButtonFlags_MouseButtonMiddle)
+    CImGui.AddImage(CImGui.GetWindowDrawList(), CImGui.ImTextureRef(CImGui.ImTextureID(UInt64(tex))),
+                    CImGui.GetItemRectMin(), CImGui.GetItemRectMax(), ImVec2(0, 1), ImVec2(1, 0))   # GL rows are bottom-up
+    camera_input!(view, dw, dh)
+    # a right click without drag toggles the controls window; a right drag pans
+    rmb = CImGui.ImGuiMouseButton_Right
+    clicked && CImGui.IsMouseReleased(rmb) && !CImGui.IsMouseDragPastThreshold(rmb) && (CONTROLS_OPEN[view] = !controls_open(view))
     CImGui.PopID()
-    controls && drag_state(view).controls_open && controls_window!(view)
+    controls && controls_open(view) && controls_window!(view)
     nothing
 end
 
-function camera_input!(view::View, hovered::Bool, w, h)
-    io = CImGui.GetIO()
+# camera motion from the input on the view's item (the last submitted one)
+function camera_input!(view::View, w, h)
+    io = CImGui.GetIO(); cam = view.camera
     d = unsafe_load(io.MouseDelta)
-    drag = drag_state(view); cam = view.camera
-    hovered && CImGui.IsMouseClicked(0) && (drag.rotating = true)
-    hovered && (CImGui.IsMouseClicked(1) || CImGui.IsMouseClicked(2)) && (drag.panning = true)
-    CImGui.IsMouseDown(0) || (drag.rotating = false)
-    CImGui.IsMouseDown(1) || CImGui.IsMouseDown(2) || (drag.panning = false)
-
-    # right-click without drag toggles the controls window; a right drag pans
-    hovered && CImGui.IsMouseClicked(1) && (drag.rmb_on_widget = true; drag.rmb_dragged = false)
-    CImGui.IsMouseDragging(1) && (drag.rmb_dragged = true)
-    if CImGui.IsMouseReleased(1)
-        drag.rmb_on_widget && !drag.rmb_dragged && (drag.controls_open = !drag.controls_open)
-        drag.rmb_on_widget = false
+    if CImGui.IsItemActive()
+        if CImGui.IsMouseDown(CImGui.ImGuiMouseButton_Left)
+            dyaw, dpitch = -d.x * ROT_SPEED, -d.y * ROT_SPEED
+            view.flymode ? flylook!(cam, dyaw, dpitch) : orbit!(cam, dyaw, -dpitch)
+        elseif CImGui.IsMouseDown(CImGui.ImGuiMouseButton_Right) || CImGui.IsMouseDown(CImGui.ImGuiMouseButton_Middle)
+            pan!(cam, d.x / w, d.y / h)
+        end
     end
 
-    if drag.rotating
-        dyaw, dpitch = -d.x * ROT_SPEED, -d.y * ROT_SPEED
-        view.flymode ? flylook!(cam, dyaw, dpitch) : orbit!(cam, dyaw, -dpitch)
-    elseif drag.panning
-        pan!(cam, d.x / w, d.y / h)
+    # wheel and fly keys act while the view is hovered or held, and the view takes them from the host window
+    # (no scrolling) and from other widgets
+    if CImGui.SetItemKeyOwner(CImGui.ImGuiKey_MouseWheelY)
+        wheel = unsafe_load(io.MouseWheel)
+        wheel != 0 && zoom!(cam, exp(-ZOOM_SPEED * wheel), view.initial_camera)
     end
-
-    hovered || return
-    wheel = unsafe_load(io.MouseWheel)
-    wheel != 0 && zoom!(cam, exp(-ZOOM_SPEED * wheel), view.initial_camera)
     if view.flymode
-        key(k) = CImGui.IsKeyDown(k) ? 1.0 : 0.0
+        key(k) = CImGui.SetItemKeyOwner(k) && CImGui.IsKeyDown(k) ? 1.0 : 0.0
         fwd = key(CImGui.ImGuiKey_W) - key(CImGui.ImGuiKey_S)
         rgt = key(CImGui.ImGuiKey_D) - key(CImGui.ImGuiKey_A)
         upd = key(CImGui.ImGuiKey_Space) - key(CImGui.ImGuiKey_C)
@@ -81,7 +74,7 @@ function controls_window!(view::View)
     open = Ref(true)
     (@c CImGui.Begin("Controls##$(objectid(view))", &open[])) && ShowControls(view)
     CImGui.End()
-    open[] || (drag_state(view).controls_open = false)
+    open[] || (CONTROLS_OPEN[view] = false)
 end
 
 # ── controls panel ──

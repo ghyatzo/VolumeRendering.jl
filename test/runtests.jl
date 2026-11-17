@@ -1707,10 +1707,11 @@ end
     colored = Mapped(g, Colormap(ColorSchemes.viridis, value_range(g)))
     view = View([Volume(colored; region = Box(g)), Surface(Plane(:z, 0.0, Box(g)); color = colored, opacity = 0.5),
                  Lines([[SVector(0.0, 0, 0), SVector(1.0, 0, 0)]]; label = "axis")]; camera = Camera(; radius = 2))
-    function frame()   # the host window fills (0, 0)–(400, 400); the image fills its content region
+    winpos = Ref(ig.ImVec2(0, 0))
+    function frame()   # the host window starts at (0, 0)–(400, 400), free to move; the image fills its content region
         ig.lib.ImGui_ImplOpenGL3_NewFrame(); ig.NewFrame()
-        ig.SetNextWindowPos(ig.ImVec2(0, 0)); ig.SetNextWindowSize(ig.ImVec2(400, 400))
-        ig.Begin("host"); VR.ShowView(view); ig.End()
+        ig.SetNextWindowPos(ig.ImVec2(0, 0), ig.ImGuiCond_Once); ig.SetNextWindowSize(ig.ImVec2(400, 400), ig.ImGuiCond_Once)
+        ig.Begin("host"); VR.ShowView(view); winpos[] = ig.GetWindowPos(); ig.End()
         ig.Render(); ig.lib.ImGui_ImplOpenGL3_RenderDrawData(Ptr{Cint}(ig.GetDrawData()))
     end
     event(f, args...) = (f(io, args...); frame())
@@ -1720,18 +1721,27 @@ end
     eye, d = view.camera.eye, VR.distance(view.camera)
     event(ig.AddMouseButtonEvent, 0, true); event(ig.AddMousePosEvent, 240, 210); event(ig.AddMouseButtonEvent, 0, false)
     @test view.camera.eye != eye && VR.distance(view.camera) ≈ d   # left drag orbits
+    @test (winpos[].x, winpos[].y) == (0, 0)                       # … and the view owns the drag: the host window stays put
     event(ig.AddMouseWheelEvent, 0, 1)
     @test VR.distance(view.camera) ≈ d * exp(-VR.ZOOM_SPEED)        # wheel zooms
     view.flymode = true; lookat = view.camera.lookat
     event(ig.AddKeyEvent, ig.ImGuiKey_W, true); frame(); event(ig.AddKeyEvent, ig.ImGuiKey_W, false)
     @test VR.distance(view.camera) ≈ d * exp(-VR.ZOOM_SPEED) && view.camera.lookat != lookat   # W flies eye and lookat together
+    event(ig.AddMousePosEvent, 600, 500); lookat = view.camera.lookat
+    event(ig.AddKeyEvent, ig.ImGuiKey_W, true); frame(); event(ig.AddKeyEvent, ig.ImGuiKey_W, false)
+    @test view.camera.lookat == lookat                              # … only while the view is hovered
+    event(ig.AddMousePosEvent, 200, 200)
     view.flymode = false
 
     lookat = view.camera.lookat
     event(ig.AddMouseButtonEvent, 1, true); foreach(k -> event(ig.AddMousePosEvent, 200 + 10k, 210), 1:3); event(ig.AddMouseButtonEvent, 1, false)
-    @test !VR.drag_state(view).controls_open && view.camera.lookat != lookat   # a right drag pans and does not toggle
+    @test !VR.controls_open(view) && view.camera.lookat != lookat   # a right drag pans and does not toggle
     event(ig.AddMouseButtonEvent, 1, true); event(ig.AddMouseButtonEvent, 1, false)
-    @test VR.drag_state(view).controls_open                         # right click without drag opens the controls
+    @test VR.controls_open(view)                                    # right click without drag opens the controls
+    lookat = view.camera.lookat
+    event(ig.AddMouseButtonEvent, 2, true); event(ig.AddMousePosEvent, 230, 220); event(ig.AddMouseButtonEvent, 2, false)
+    @test VR.controls_open(view) && view.camera.lookat != lookat    # a middle drag pans too
+    @test (winpos[].x, winpos[].y) == (0, 0)
     foreach(_ -> frame(), 1:3)                                      # ShowControls: every section, incl. the extinction editor
     VR.glcheck()
 
