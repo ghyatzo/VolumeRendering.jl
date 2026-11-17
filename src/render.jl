@@ -1,6 +1,4 @@
-# Program assembly (§6.4), the frame plan and passes (§6.3), and the public render entry points (§8).
-
-# ── uniforms: the §2 type table ──
+# ── uniforms ──
 
 glsl_type(::Bool) = "bool"
 glsl_type(::Integer) = "int"
@@ -81,7 +79,7 @@ const BLIT_FRAG = """
     void main() { vr_frag = texture(vr_src, gl_FragCoord.xy / vr_viewport); }
     """
 
-# §6.7 hit selection per Surface variant; the near variant skips a Plane's single (coincident) hit
+# hit selection per Surface variant; the near variant skips a Plane's single (coincident) hit
 const SURFACE_HITS = (opaque = "h.x > 0.0 ? h.x : h.y", far = "h.y", near = "h.x == h.y ? -1.0 : h.x")
 
 surface_body(t) = """
@@ -106,7 +104,7 @@ const VOLUME_DECLS = """
 # MIP and average have no intrinsic opacity: the layer alpha is the extinction LUT at the reduced value
 mapped_layer(v) = "float u = vr_norm($v); float a = clamp(vr_alpha(u), 0.0, 1.0); vr_frag = vec4(vr_lut(vr_cmap, u).rgb * a, a);"
 
-# §6.5 per-mode parts of the march: accumulator declarations, per-sample update, output
+# per-mode parts of the march: accumulator declarations, per-sample update, output
 const VOLUME_MODES = (
     dvr = (init = "vec3 col = vec3(0.0); float alpha = 0.0;",
            step = "vec4 c = vr_color(pos); float av = 1.0 - exp(-c.a * vr_density * dt); " *   # dt-correct opacity
@@ -203,7 +201,7 @@ const LINES_BODY = """
     }
     """
 
-# ── colour sources (§4.3) ──
+# ── colour sources ──
 
 # GLSL-bearing objects of a program, in declaration order (field before shape)
 field_part(f) = (; object = f, textures = textures(f), uniforms = uniforms(f), glsl = field_glsl(f))
@@ -219,7 +217,7 @@ source_parts(bridge; objects = [], colormap = nothing, decls = "", uniforms = (;
     (; objects, colormap, decls, bridge, uniforms, payload)
 
 # the payload at the fragment's segment point p, interpolated by p's parameter along the segment: the same
-# perspective-correct rule as p itself (§6.7)
+# perspective-correct rule as p itself
 const PAYLOAD_GLSL = """
     float vr_seg_u(vec3 p) {
         vec3 a = vr_ha.xyz / vr_ha.w, ab = vr_hb.xyz / vr_hb.w - a; float l2 = dot(ab, ab);
@@ -238,7 +236,7 @@ color_source(f) = source_parts("vec4 vr_color(vec3 p) { return value(p); }\n"; o
 mapped_source(vals::Vector{<:Vector{<:Real}}, colormap) = vertex_parts(vals, mapped_bridge("mix(vr_va, vr_vb, vr_seg_u(p))"); colormap)
 mapped_source(f, colormap) = source_parts(mapped_bridge("value(p)"); objects = [field_part(f)], colormap)
 
-# ── colormap (§4.1) ──
+# ── colormap ──
 
 colormap_lut(scheme::ColorScheme) = map(u -> RGBA{Float32}(get(scheme, u)), range(0.0, 1.0; length = 256))
 
@@ -250,7 +248,7 @@ colormap_glsl(c::Colormap, extinction) = """
     float vr_norm(float v) { return clamp(($(c.log ? "log(max(v, 1e-30))" : "v") - vr_cmap_lo) / (vr_cmap_hi - vr_cmap_lo), 0.0, 1.0); }
     $(alpha_glsl(extinction))"""
 
-# ── extinction (§5): only a Volume with a Mapped colour has one ──
+# ── extinction: only a Volume with a Mapped colour has one ──
 
 mapped_extinction(::Mapped, m::Volume) = m.extinction
 mapped_extinction(_, ::Volume) = nothing
@@ -277,7 +275,7 @@ end
 
 const MAX_SAMPLERS = 16   # GL_MAX_TEXTURE_IMAGE_UNITS on macOS GL 4.1
 
-# a framebuffer attachment of the view (§6.3), bound like a texture; owned by the view, not a cache entry. Resolved at
+# a framebuffer attachment of the view, bound like a texture; owned by the view, not a cache entry. Resolved at
 # draw time: the framebuffers are (re)sized after the plan is built
 struct Attachment
     get::Function   # ResourceCache → GLTexture
@@ -300,7 +298,7 @@ extinction_units(::Nothing) = Unit[]
 # the key holds a copy: it is compared by value, and an in-place edit must not change a stored key
 extinction_units(e) = (pts = copy(e); [Unit(:vr_extinction, (:extinction, pts) => () -> upload(extinction_lut(pts)), ((:clamp,), :linear))])
 
-# one draw call of the frame plan; marks assemble to `pass => Draw` steps, pass ∈ :opaque | :march | :composite | :translucent (§6.3)
+# one draw call of the frame plan; marks assemble to `pass => Draw` steps, pass ∈ :opaque | :march | :composite | :translucent
 struct Draw
     vert::String
     frag::String
@@ -322,7 +320,7 @@ texture_requirements(::Attachment) = []
 buffer_requirements(::Nothing) = []
 buffer_requirements(b::Pair) = [b]
 
-# fragment source, uniforms and units of one program (§6.4); validates everything before any GL call
+# fragment source, uniforms and units of one program; validates everything before any GL call
 function assemble_fragment(color, objects, engine_decls, body; extinction = nothing, engine_units = Unit[])
     check_declared_names(map(o -> o.object, objects))
     texs = mapreduce(o -> o.textures, merge, objects; init = (;))
@@ -337,7 +335,9 @@ function assemble_fragment(color, objects, engine_decls, body; extinction = noth
     (; frag, uniforms = merge(unis, colormap_uniforms(color.colormap), color.uniforms), units)
 end
 
-# §6.1/6.2 prelude uniforms
+# prelude uniforms. Depth is reversed: surfaces and lines write gl_FragDepth = vr_near / t to a float buffer cleared to
+# 0 (nothing drawn) and tested GEQUAL — ~2⁻²³ relative precision at every distance ≥ vr_near, independent of scene
+# bounds; on a tie the later draw wins, so list order means "on top" in the opaque pass as in the translucent one
 function frame_uniforms(cam::Camera, w, h)
     right, up, fwd = view_basis(cam)
     ortho = cam.projection === :ortho
@@ -346,7 +346,7 @@ function frame_uniforms(cam::Camera, w, h)
        vr_viewport = SVector(float(w), float(h)), vr_near = 1e-6 * (ortho ? cam.ortho_half : distance(cam)))
 end
 
-# §6.7: NDC rectangle of the projected aabb corners, ±1 px; full screen when a corner is behind the eye
+# NDC rectangle of the projected aabb corners, ±1 px; full screen when a corner is behind the eye
 function impostor_rect(shape, cam::Camera, w, h)
     P = view_proj(cam, w / h)
     clip = map(c -> P * SVector(c..., 1.0), Iterators.product(zip(aabb(shape)...)...))   # the 8 corners
@@ -360,7 +360,7 @@ end
 
 # `frame`: (; camera, w, h, vsize = volume march size, sample = refinement frame index); every method returns its steps
 
-# §6.7: opacity 1 → one opaque draw; else far hits, then near hits, blended
+# opacity 1 → one opaque draw; else far hits, then near hits, blended
 assemble(m::Surface, frame) = m.opacity == 1 ? [:opaque => surface_draw(m, :opaque, frame)] :
                                                [:translucent => surface_draw(m, :far, frame), :translucent => surface_draw(m, :near, frame)]
 
@@ -380,7 +380,7 @@ function assemble(m::Lines, (; camera, w, h))
     [:opaque => Draw(lines_vert(color.payload), frag, merge(frame_uniforms(camera, w, h), uniforms, engine), units, buffer)]
 end
 
-# §6.5: march into vol_fb at vsize (same aspect w/h), then composite over the scene
+# march into vol_fb at vsize (same aspect w/h), then composite over the scene
 function assemble(m::Volume, (; camera, w, h, vsize, sample))
     color = color_source(m.color)
     (; frag, uniforms, units) = assemble_fragment(color, [color.objects; shape_part(m.region)], VOLUME_DECLS, volume_body(m.mode);
@@ -397,7 +397,7 @@ blit(src::Unit, w, h) = Draw(RECT_VERT, BLIT_FRAG, (; vr_rect = FULLSCREEN, vr_v
 payload_key(::Nothing) = nothing
 payload_key(p) = Identity(p)
 
-# §6.7 vertex buffer: one record per segment
+# Lines vertex buffer: one record per segment
 segment_pairs(v) = zip(view(v, 1:length(v)-1), view(v, 2:length(v)))
 f32(p) = convert(SVector{3,Float32}, p)
 vertex_attr(c::Color) = RGB{Float32}(c)
@@ -408,7 +408,7 @@ segment_records(polylines, payload) =
     [(; a = f32(a), b = f32(b), pa = vertex_attr(x), pb = vertex_attr(y))
      for (l, p) in zip(polylines, payload) for ((a, b), (x, y)) in zip(segment_pairs(l), segment_pairs(p))]
 
-# ── passes (§6.3) ──
+# ── passes ──
 
 gl_enable(cap, on::Bool) = on ? GL.glEnable(cap) : GL.glDisable(cap)
 
@@ -468,7 +468,7 @@ function scene_step!(cache, d, w, h; depth_test)
     draw!(cache, d)
 end
 
-# §6.3 step 3: fold the n-th frame into the running mean
+# fold the n-th frame into the running mean
 function accumulate_pass!(cache::ResourceCache, d::Draw, n, w, h)
     GL.glBindFramebuffer(GL.GL_FRAMEBUFFER, cache.accum_fb.fbo)
     pass_state!(w, h; depth_test = false, depth_write = false,
@@ -476,7 +476,7 @@ function accumulate_pass!(cache::ResourceCache, d::Draw, n, w, h)
     draw!(cache, d)
 end
 
-# ── public entry points (§8) ──
+# ── public entry points ──
 
 refine_target(view::View) = any(jittered, view.marks) ? view.refine_frames : 1
 

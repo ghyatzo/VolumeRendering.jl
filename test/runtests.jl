@@ -673,7 +673,7 @@ end
     @test !isequal(VR.snapshot(sc.view, 64, 48), VR.snapshot(sc.view, 65, 48))
     @test same(() -> sc.m.colormap = Colormap(ColorSchemes.viridis, 0..1))       # equal values → equal
     @test same(() -> sc.g.data = KeyedArray(A; x = 1:4, y = 1:4, z = 1:4))   # new wrapper, same parent array
-    @test same(() -> A[1] = 99)                                      # in-place edit: undetected (documented)
+    @test same(() -> A[1] = 99)                                      # in-place edit: undetected
     @test same(() -> sc.ln.polylines[1][1] = SVector(5.0, 0, 0))
     @test !same(() -> sc.g.data = grid(4))                           # new array
     @test !same(() -> sc.ln.polylines = [[SVector(0.0, 0, 0), SVector(1.0, 0, 0)]])
@@ -726,7 +726,7 @@ end
     cam = Camera(; radius = 1)
     asm(m, cam, w, h) = last(only(VR.assemble(m, (; camera = cam, w, h, vsize = (w, h), sample = 0))))
 
-    # §2 uniform type table
+    # uniform type table
     for (x, T) in [(true, "bool"), (3, "int"), (Int8(3), "int"), (2.5, "float"), (1//2, "float"), (π, "float"),
                    (SVector(1, 2), "ivec2"), (SVector(1, 2, 3, 4), "ivec4"), (SVector(1.0, 2.0, 3.0), "vec3"),
                    (SVector(1f0, 2f0, 3f0, 4f0), "vec4"), (SMatrix{3,3}(1.0:9), "mat3"), (SMatrix{4,4}(1:16), "mat4")]
@@ -740,7 +740,7 @@ end
     glsl = "float value(vec3 p) { return 0.0; } float stepSize(vec3 p) { return 1.0; }"
     surf(f; shape = Sphere(radius = 1)) = Surface(shape; color = Mapped(f, cmap))
 
-    # declarations in §6.4 order; field textures take units 0, 1, … and the colormap follows
+    # declaration order: textures (units 0, 1, …), then uniforms; the colormap follows
     f = GLSLField(glsl; textures = (; a = Texture(rand(2, 2, 2)), b = Texture(rand(4))), uniforms = (; k = 1.0, R = SMatrix{3,3}(1.0:9)))
     d = asm(surf(f; shape = Box(0..1, 0..1, 0..1)), cam, 64, 48)
     @test occursin("""
@@ -792,7 +792,7 @@ end
     @test_throws "vr_" asm(surf(GLSLField(glsl; uniforms = (; vr_k = 1.0))), cam, 64, 48)
     @test_throws "unsupported" asm(Lines(pl; color = Mapped(GLSLField(glsl; uniforms = (; k = "x")), cmap)), cam, 64, 48)
 
-    # §6.7 impostor rectangle: projected aabb ±1 px, clamped; full screen when a corner is behind the eye
+    # impostor rectangle: projected aabb ±1 px, clamped; full screen when a corner is behind the eye
     top = Camera(SVector(0.0, 0, 3), SVector(0.0, 0, 0), SVector(0.0, 1, 0), :ortho, 90.0, 2.0)
     @test VR.impostor_rect(Box(-1..0.5, 0..1, -1..1), top, 40, 20) ≈ [-0.25 - 0.05, 0 - 0.1, 0.125 + 0.05, 0.5 + 0.1]
     @test VR.impostor_rect(Box(-9..9, 0..1, -1..1), top, 40, 20) ≈ [-1.05, -0.1, 1.05, 0.6]
@@ -928,7 +928,7 @@ end
 @testitem "ray hits: Sphere, Box, Plane" setup = [GLContext] begin
     import VolumeRendering as VR
     using StaticArrays, ColorTypes, IntervalSets, LinearAlgebra
-    # independent Float64 reference: the pixel-centre ray of §6.1 and analytic hits
+    # independent Float64 reference: the pixel-centre ray of `vr_ray` and analytic hits
     function ray(cam, w, h, row, col)
         right, up, fwd = VR.view_basis(cam); fs = VR.fovscale(cam)
         x, y = (col - 0.5) / w * 2 - 1, (h - row + 0.5) / h * 2 - 1
@@ -1030,7 +1030,7 @@ end
     using StaticArrays, ColorTypes
     cam = GLContext.topcam(; projection = :perspective)              # w = 3 - z
     w(p) = 3 - p[3]
-    # Float64 reference of §6.7: move the behind endpoint along the segment to w = 1e-4 × the front endpoint's w
+    # Float64 reference of the eye-plane clip in `lines_vert`: move the behind endpoint along the segment to w = 1e-4 × the front endpoint's w
     clipped(a, b) = a + (b - a) * ((1 - 1e-4) * w(a) / (w(a) - w(b)))
     img(pl) = render_image(View([Lines([pl])]; camera = cam), 48, 48)
     a = SVector(0.2, 0.013, 0.0)

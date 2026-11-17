@@ -1,7 +1,4 @@
-# Dear ImGui UI (§9): `ShowView` draws a View as an interactive image; `ShowControls` emits its settings panel, one
-# section per object through `controls!`. None of it is exported: hosts call `VolumeRendering.ShowView` etc.
-
-# ── widget (§9.1) ──
+# ── widget ──
 
 const ROT_SPEED = 0.007   # rad per pixel of drag
 const ZOOM_SPEED = 0.12   # per mouse-wheel notch
@@ -87,7 +84,7 @@ function controls_window!(view::View)
     open[] || (drag_state(view).controls_open = false)
 end
 
-# ── controls panel (§9.2) ──
+# ── controls panel ──
 
 """    VolumeRendering.controls!(x)
 
@@ -247,7 +244,7 @@ function implot_cmap(name::Symbol)
     ImPlot.AddColormap(String(name), cols, IMPLOT_CMAP_N, false)   # continuous
 end
 
-# turning log on with lo ≤ 0 < hi also moves the window to (hi/1e3)..hi (the §4.1 invariant); with hi ≤ 0 it is refused
+# turning log on with lo ≤ 0 < hi also moves the window to (hi/1e3)..hi (a log window must be positive); with hi ≤ 0 it is refused
 function set_log!(c::Colormap, on::Bool)
     lo, hi = endpoints(c.window)
     on && hi <= 0 && return c

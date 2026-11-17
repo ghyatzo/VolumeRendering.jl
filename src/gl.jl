@@ -1,5 +1,3 @@
-# OpenGL layer: programs, textures, sampler objects, instance buffers, framebuffers, and the resource cache.
-
 glcheck() = (e = GL.glGetError(); e == GL.GL_NO_ERROR || error("GL error 0x$(string(e; base = 16))"); nothing)
 
 gen(f) = (r = Ref{GL.GLuint}(0); f(1, r); r[])
@@ -96,7 +94,7 @@ function GLTexture{T}(size::NTuple{N,Int}, data::Union{Array{T,N},Ptr{Cvoid}}) w
     tex
 end
 
-# §2.1 upload conversions
+# element type → texel type: Real → R32F, fixed-point colours → RGBA8, other colours → RGBA32F
 texel_array(data::AbstractArray{<:Real,N}) where {N} = convert(Array{Float32,N}, data)
 texel_array(data::AbstractArray{<:Colorant{<:FixedPoint},N}) where {N} = convert(Array{RGBA{N0f8},N}, data)
 texel_array(data::AbstractArray{<:Colorant,N}) where {N} = convert(Array{RGBA{Float32},N}, data)
@@ -171,7 +169,7 @@ end
 
 gl_delete(b::InstanceBuffer) = (GL.glDeleteVertexArrays(1, Ref(b.vao)); GL.glDeleteBuffers(1, Ref(b.vbo)))
 
-# ── framebuffers (§6.3) ──
+# ── framebuffers ──
 
 struct Framebuffer{T}
     fbo::GL.GLuint
@@ -199,9 +197,10 @@ gl_delete(::Nothing) = nothing
 gl_delete(fb::Framebuffer) = (GL.glDeleteFramebuffers(1, Ref(fb.fbo)); gl_delete(fb.color); gl_delete(fb.depth))
 
 scene_framebuffer(w, h) = Framebuffer{RGBA{N0f8}}((w, h); depth = true)
+# volume march output and the refinement mean: 16-bit float, since 8 bits would band faint layers before averaging
 float_framebuffer(w, h) = Framebuffer{RGBA{Float16}}((w, h); depth = false)
 
-# ── resource cache (§7) ──
+# ── resource cache ──
 
 # `hash` = objectid, `==` is `===`; holds `x` strongly so its id cannot be reused while the key lives
 struct Identity{T}
@@ -211,7 +210,7 @@ Base.:(==)(a::Identity, b::Identity) = a.x === b.x
 Base.hash(a::Identity, h::UInt) = hash(objectid(a.x), h)
 
 mutable struct ResourceCache
-    const entries::Dict{Any,Any}   # key (§7.1) => Program | GLTexture | GLSampler | InstanceBuffer
+    const entries::Dict{Any,Any}   # key => Program | GLTexture | GLSampler | InstanceBuffer
     const empty_vao::GL.GLuint     # attribute-less draws still need a bound VAO in the core profile
     scene_fb::Framebuffer{RGBA{N0f8}}
     vol_fb::Framebuffer{RGBA{Float16}}
@@ -228,7 +227,7 @@ function fit_framebuffers!(cache::ResourceCache, (w, h), (vw, vh))
     cache
 end
 
-# §7.2: delete every entry whose key the frame plan does not list
+# delete every entry whose key the frame plan does not list
 function sweep!(cache::ResourceCache, needed)
     stale = filter(∉(needed), collect(keys(cache.entries)))
     foreach(k -> gl_delete(pop!(cache.entries, k)), stale)

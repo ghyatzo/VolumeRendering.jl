@@ -16,11 +16,11 @@ vol = Volume(Mapped(grid, Colormap(ColorSchemes.viridis, value_range(grid))); re
 # the camera frames the box, tilted off face-on so the lobes read as 3-D ("reset view" returns to this pose)
 view = View([vol]; camera = orbit!(Camera(; bounds(vol.region)...), 0.6, 0.5))
 
-# ── interactive window (the render loop is owned by the host, per the package design) ──
+# ── interactive window: the host owns the render loop ──
 CImGui.set_backend(:GlfwOpenGL3)
 ctx = CImGui.CreateContext()
 let io = CImGui.GetIO()
-    io.ConfigFlags = unsafe_load(io.ConfigFlags) | CImGui.ImGuiConfigFlags_DockingEnable  # enable docking
+    io.ConfigFlags = unsafe_load(io.ConfigFlags) | CImGui.ImGuiConfigFlags_DockingEnable
 end
 
 CImGui.render(ctx;

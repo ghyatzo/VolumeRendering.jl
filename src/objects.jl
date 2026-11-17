@@ -1,6 +1,4 @@
-# GLSL-bearing objects: textures, fields (§2), shapes (§3), and validation of the names they declare (§6.4).
-
-# ── Texture (§2.1) ──
+# ── Texture ──
 
 """    Texture(data; wrap = :clamp, filter = :linear)
 
@@ -32,7 +30,7 @@ Texture(data::AbstractArray{<:Any,N}; wrap = :clamp, filter = :linear) where {N}
 # textures are cached by their unwrapped array, so a new KeyedArray wrapper around the same parent does not re-upload
 cache_key(data::AbstractArray) = AxisKeys.keyless_unname(data)
 
-# ── field interface (§2) and the parts shared with shapes (§3) ──
+# ── field and shape interfaces ──
 
 """    field_glsl(f)::String
 
@@ -107,13 +105,12 @@ The axis-aligned bounding box of the shape `s`, as `(; lo, hi)` corner `SVector`
 """
 function aabb end
 
-# interface conformance: the required methods exist
 isfield(x) = applicable(field_glsl, x) && applicable(value_kind, x)
 isshape(x) = applicable(shape_glsl, x) && applicable(bounds, x) && applicable(aabb, x)
 
 nan_extrema(itr) = ((lo, hi) = extrema(Iterators.filter(!isnan, itr)); convert(Float64, lo)..convert(Float64, hi))
 
-# ── GridField (§2.2) ──
+# ── GridField ──
 
 """    GridField(A::KeyedArray; interpolation = :linear)
 
@@ -165,7 +162,6 @@ the axis keys `key`. Defined for `AbstractRange`s; add a method to use another a
 axis_index_glsl(key::AbstractRange, coordvar::AbstractString)::String =
     "(($coordvar) - $(glsl_float(first(key)))) * $(glsl_float(inv(convert(Float64, step(key)))))"
 
-# smallest cell edge along an axis
 _axis_min_cell(key::AbstractRange) = abs(convert(Float64, step(key)))
 _axis_min_cell(key) = minimum(d -> abs(convert(Float64, d)), diff(key))
 
@@ -209,7 +205,7 @@ value_range(f::GridField) = data_range(f.data)
 data_range(A::AbstractArray{<:Colorant}) = 0.0..1.0
 data_range(A::AbstractArray{<:Real}) = nan_extrema(A)
 
-# ── GLSLField (§2.3) ──
+# ── GLSLField ──
 
 """    GLSLField(glsl; kind = :scalar, textures = (;), uniforms = (;), value_range = 0.0..1.0)
 
@@ -237,7 +233,7 @@ textures(f::GLSLField) = f.textures
 uniforms(f::GLSLField) = f.uniforms
 value_range(f::GLSLField) = f.value_range
 
-# ── built-in shapes (§3) ──
+# ── built-in shapes ──
 
 """    Sphere(; center = SVector(0.0, 0.0, 0.0), radius)
 
@@ -334,7 +330,7 @@ shape_glsl(::Plane) = """
     }
     """
 
-# ── declared-name validation (§6.4) ──
+# ── declared-name validation ──
 
 # GLSL 4.10 §3.6: keywords, then words reserved for future use
 const GLSL_RESERVED = Set(split("""

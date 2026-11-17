@@ -1,6 +1,5 @@
-# Pure helpers returning data for `Lines` (§10). Angles are radians; Unitful angles work too, since they only reach sin/cos.
-
 # a count → evenly spaced with the poles left out (an odd count includes the equator); explicit angles pass through
+# (angles only reach sin/cos, so Unitful ones work as they are)
 parallel_lats(n::Integer) = range(-π/2, π/2, n + 2)[2:end-1]
 parallel_lats(lats) = lats
 # a count → evenly spaced over the full turn; a meridian is a half great circle pole to pole
@@ -55,8 +54,6 @@ function axis_lines(center, radius)
     (; polylines = [[center - radius * e, center + radius * e] for e in units],
        colors = [fill(c, 2) for c in (RGB(1.0, 0.0, 0.0), RGB(0.0, 1.0, 0.0), RGB(0.0, 0.0, 1.0))])
 end
-
-# ── vector fields (UniformStreamlines) ──
 
 """    VectorField(f; region::Box)
 

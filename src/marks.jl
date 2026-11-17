@@ -1,7 +1,3 @@
-# Colour (§4), marks and their validation (§5), the View (§8), and the render-on-demand snapshot (§7.3).
-
-# ── Colormap (§4.1) ──
-
 """    Colormap(scheme::ColorScheme, window::ClosedInterval; log = false)
 
 Maps values in `window` onto the colour scheme (a ColorSchemes.jl object), linearly or, with `log = true`, in log
@@ -26,8 +22,6 @@ function validate(c::Colormap)
     c
 end
 
-# ── Mapped (§4.2) ──
-
 """    Mapped(source, colormap::Colormap)
 
 A colour from a scalar `source` through `colormap`. `source` is a `:scalar` field, or per-vertex values
@@ -50,8 +44,6 @@ source_kind(f) = isfield(f) && value_kind(f) === :scalar ? :field :
 
 value_range(vals::Vector{<:Vector{<:Real}}) = nan_extrema(Iterators.flatten(vals))
 
-# ── colour sources (§4.3) ──
-
 color_kind(::Color) = :constant
 color_kind(c::TransparentColor) =
     throw(ArgumentError("a constant colour must be an alpha-less Color (a mark's opacity is its alpha), got $(typeof(c))"))
@@ -61,8 +53,6 @@ color_kind(c::Vector{<:Vector{<:TransparentColor}}) =
 color_kind(m::Mapped) = (validate(m); source_kind(m.source) === :values ? :mapped_values : :mapped_field)
 color_kind(f) = isfield(f) && value_kind(f) === :color ? :color_field :
     throw(ArgumentError("a mark colour must be a Color, per-vertex Colors, a :color field or a Mapped; got $(summary(f))"))
-
-# ── marks (§5) ──
 
 """    Volume(color; region, extinction = [SVector(0.0, 0.0), SVector(1.0, 1.0)], mode = :dvr, density = 1.0, step_scale = 0.5, label = nothing)
 
@@ -83,7 +73,7 @@ Overlapping volumes are marched separately, not jointly.
 Base.@kwdef mutable struct Volume
     color::Any
     region::Any
-    extinction::Vector{SVector{2,Float64}} = [SVector(0.0, 0.0), SVector(1.0, 1.0)]   # (u, σ), Mapped colours only
+    extinction::Vector{SVector{2,Float64}} = [SVector(0.0, 0.0), SVector(1.0, 1.0)]
     mode::Symbol = :dvr
     density::Float64 = 1.0
     step_scale::Float64 = 0.5
@@ -173,11 +163,9 @@ end
 check_nesting(pervertex, polylines) = map(length, pervertex) == map(length, polylines) ||
     throw(ArgumentError("per-vertex colours/values must have the polylines' nesting and lengths"))
 
-# drives progressive refinement (§6.6)
+# drives progressive refinement
 jittered(::Volume) = true
 jittered(::Union{Surface,Lines}) = false
-
-# ── View (§8) ──
 
 """    View(marks; camera::Camera, background = RGB(0.0, 0.0, 0.0), max_volume_px = 2048, refine_frames = 16,
          flymode = false, fly_speed)
@@ -225,7 +213,7 @@ default_fly_speed(cam::Camera) = (cam.projection === :ortho ? cam.ortho_half : d
 
 reset!(view::View) = (reset!(view.camera, view.initial_camera); view)
 
-# ── snapshot (§7.3): identity leaves only for bulk arrays, everything else by value; O(marks), never O(data) ──
+# render-on-demand snapshot: identity leaves only for bulk arrays, everything else by value; O(marks), never O(data)
 
 fieldvalues(x) = ntuple(i -> getfield(x, i), fieldcount(typeof(x)))
 
@@ -237,7 +225,6 @@ snapshot(m::Volume) = (:Volume, snapshot(m.color), snapshot_shape(m.region), cop
 snapshot(m::Surface) = (:Surface, snapshot_shape(m.shape), snapshot(m.color), m.opacity)
 snapshot(m::Lines) = (:Lines, Identity(m.polylines), snapshot(m.color), m.width_px)
 
-# colour sources and Mapped sources
 snapshot(c::Colorant) = c
 snapshot(pervertex::AbstractVector) = Identity(pervertex)
 snapshot(m::Mapped) = (snapshot(m.source), fieldvalues(m.colormap)...)

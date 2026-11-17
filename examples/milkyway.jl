@@ -1,6 +1,7 @@
-# Milky Way volumetric example: an RGBA colour field. The NAOJ/OpenSpace volume is a 1024×1024×128 RGBA grid
-# (RGB = emission color). Five data-prep sliders shape each voxel before it is rendered by the built-in DVR; each edit
-# re-maps the whole grid and swaps the field. Drag to orbit, scroll to zoom, right-click for the render controls.
+# Milky Way volumetric example: an RGBA colour field. The volume is OpenSpace's Milky Way model, based on NAOJ
+# simulations: a 1024×1024×128 RGBA grid, RGB = emission colour. Download it (512 MiB) into examples/milkyway/ from
+#   https://liu-se.cdn.openspaceproject.com/files/milkyway/milkyway/volume/1/MilkyWayRGBAVolume1024x1024x128.raw
+# Five data-prep sliders shape each voxel before it is rendered; each edit re-maps the whole grid and swaps the field.
 
 using VolumeRendering, AxisKeys
 using Colors, FixedPointNumbers           # RGBA, red/green/blue; N0f8
@@ -57,8 +58,7 @@ CImGui.render(ctx;
     CImGui.DockSpaceOverViewport(0, CImGui.GetMainViewport(), CImGui.ImGuiDockNodeFlags_PassthruCentralNode)
 
     CImGui.Begin("Milky Way", C_NULL)
-    # sliders bound to persistent Refs (a fresh per-frame Ref would snap back mid-drag); each edit
-    # re-maps the grid immediately (no deferral).
+    # sliders bound to persistent Refs: a fresh per-frame Ref would snap back mid-drag
     ch = false
     ch |= @c CImGui.SliderFloat("raw power",   &p1[], 0.2f0, 4.0f0,   "%.2f")
     ch |= @c CImGui.SliderFloat("color power", &p2[], 0.2f0, 3.0f0,   "%.2f")
