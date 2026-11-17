@@ -42,7 +42,9 @@ A `View` draws a list of marks through a camera:
 - `Surface(shape; color, opacity)` draws the surface of a shape;
 - `Lines(polylines; color, width_px)` draws polylines.
 
-Fields are functions of 3D position evaluated on the GPU. `GridField` samples a `KeyedArray` whose dim names choose the coordinates: `(x, y, z)`, or `(lon, lat)` for a field on directions from the origin, e.g. to colour a sphere. `GLSLField` is written directly in GLSL. A grid of colours is a colour field (rgb = emission, alpha = extinction). Shapes are `Sphere`, `Box` and `Plane`.
+Fields are functions of 3D position evaluated on the GPU. The simplest is a `GridField` wrapper around a `KeyedArray` whose dim names choose the coordinates: `(x, y, z)` for a rectangular 3D grid.  At the other extreme is `GLSLField`: arbitrary field written directly in GLSL.
+
+A grid of colours is a colour field (rgb = emission, alpha = extinction). Shapes are `Sphere`, `Box` and `Plane`.
 
 A mark's `color` is a constant colour, per-vertex colours (`Lines`), a colour field, or a `Mapped`: a scalar field or per-vertex values through a `Colormap` (a `ColorScheme` and a value window).
 
@@ -66,7 +68,7 @@ Opaque marks are depth-tested; translucent ones (volumes, surfaces with `opacity
 
 # Updating
 
-Marks, fields, colormaps, `Mapped`, the camera and the view are plain mutable data, read every frame; nothing touches the GPU until the first render. Setting a property is the whole update protocol (`cmap.window = 0.1..2.0`, `vol.mode = :mip`, `grid.data = A2`, `mapped.source = other_field`), and the view re-renders only when something changed. Bulk arrays (grid data, textures, polylines, per-vertex colours/values) are tracked by identity — assign new arrays, never mutate them in place. Shared objects are shared by reference — mutate them (`mapped.source = f`) to update every mark using them. To show or hide a mark, add or remove it from `view.marks`.
+Marks, fields, colormaps, `Mapped`, the camera and the view are plain mutable data, read every frame. Setting a property is the whole update protocol (`cmap.window = 0.1..2.0`, `vol.mode = :mip`, `grid.data = A2`, `mapped.source = other_field`), and the view re-renders on the next frame if anything changed. Bulk arrays (grid data, textures, polylines, per-vertex colours/values) are tracked by identity — assign new arrays, never mutate them in place. Shared objects are shared by reference — mutate them (`mapped.source = f`) to update every mark using them. To show or hide a mark, add or remove it from `view.marks`.
 
 # Extending
 
@@ -82,4 +84,4 @@ f = GLSLField("""
 # Examples
 
 - [demo.jl](examples/demo.jl): a volume in a complete Dear ImGui program.
-- [milkyway.jl](examples/milkyway.jl): an RGBA colour volume reshaped live by sliders; it needs the OpenSpace Milky Way volume, see the file's header for the download.
+- [milkyway.jl](examples/milkyway.jl): an RGBA colour volume reshaped live by sliders
