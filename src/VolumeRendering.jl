@@ -1,8 +1,12 @@
 module VolumeRendering
 
 import ModernGL as GL
+import CImGui, ImPlot, ImPlotExtra
+import ColorSchemes
 import Rotations
 import UniformStreamlines as US
+using CImGui: ImVec2, ImVec4
+using CImGui.CSyntax: @c
 using ColorSchemes: ColorScheme
 using AxisKeys: AxisKeys, KeyedArray, axiskeys, dimnames, named_axiskeys
 using ColorTypes: Color, Colorant, RGB, RGBA, TransparentColor
@@ -22,5 +26,6 @@ include("objects.jl")
 include("marks.jl")
 include("render.jl")
 include("helpers.jl")
+include("ui.jl")
 
 end

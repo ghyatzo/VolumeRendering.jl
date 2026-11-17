@@ -1649,6 +1649,98 @@ end
     @test count(!=(RGB{N0f8}(0, 0, 0)), img) > 500
 end
 
+@testitem "UI: panel sections, log toggle, extinction edits" begin
+    import VolumeRendering as VR
+    using AxisKeys, ColorSchemes, ColorTypes, IntervalSets, StaticArrays
+    xs = range(-1, 1, 4)
+    g = GridField(KeyedArray(rand(4, 4, 4); x = xs, y = xs, z = xs))
+    gc = GridField(KeyedArray(fill(RGBA(1.0, 0.0, 0.0, 1.0), 4, 4, 4); x = xs, y = xs, z = xs))
+    glf = GLSLField("float value(vec3 p) { return 1.0; }\nfloat stepSize(vec3 p) { return 0.1; }")
+    c1 = Colormap(ColorSchemes.viridis, 0.0..1.0)
+    c2 = Colormap(ColorSchemes.turbo, 1.0..2.0)
+    shared = Mapped(g, c1)
+    marks = [Volume(shared; region = Box(g)), Surface(Plane(:z, 0.0, Box(g)); color = shared), Surface(Box(g); color = gc),
+             Surface(Sphere(radius = 1); color = Mapped(glf, c1)), Lines([[SVector(0.0, 0, 0), SVector(1.0, 0, 0)]]; color = Mapped([[1.0, 2.0]], c2)),
+             Lines([[SVector(0.0, 0, 0), SVector(1.0, 0, 0)]]), Volume(Mapped(g, c2); region = Box(g))]
+    view = View(marks; camera = Camera(; radius = 1))
+    # deduplicated by ===, first-appearance order; per-vertex values and constants contribute no field
+    @test VR.panel_fields(view) == [g, gc, glf] && VR.panel_fields(view)[1] === g
+    @test VR.panel_colormaps(view) == [c1, c2] && VR.panel_colormaps(view)[2] === c2
+    @test applicable(VR.controls!, g) && !applicable(VR.controls!, glf)
+    @test all(m -> applicable(VR.controls!, m), [marks; view; c1])
+
+    # log toggle: lo ≤ 0 < hi moves the window, hi ≤ 0 is refused, lo > 0 keeps it, turning off keeps the window
+    c = Colormap(ColorSchemes.viridis, -2.0..4.0)
+    @test VR.set_log!(c, true) === c && c.log && c.window == 0.004..4.0
+    @test (VR.set_log!(c, false); !c.log && c.window == 0.004..4.0)
+    c = Colormap(ColorSchemes.viridis, 0.5..4.0); VR.set_log!(c, true)
+    @test c.log && c.window == 0.5..4.0
+    c = Colormap(ColorSchemes.viridis, -3.0..0.0); VR.set_log!(c, true)
+    @test !c.log && c.window == -3.0..0.0
+    c = Colormap(ColorSchemes.viridis, (-3.0)..(-1.0)); VR.set_log!(c, true)
+    @test !c.log && c.window == (-3.0)..(-1.0)
+
+    # extinction edits return new sorted vectors in 0..1; end points keep u, inner points stay between neighbours
+    e = [SVector(0.0, 0.0), SVector(0.5, 0.2), SVector(1.0, 1.0)]
+    @test VR.drag_point(e, 2, SVector(0.7, 0.4)) == [SVector(0.0, 0.0), SVector(0.7, 0.4), SVector(1.0, 1.0)]
+    @test VR.drag_point(e, 2, SVector(1.5, -1.0)) == [SVector(0.0, 0.0), SVector(1.0, 0.0), SVector(1.0, 1.0)]
+    @test VR.drag_point(e, 1, SVector(0.3, 0.6)) == [SVector(0.0, 0.6), SVector(0.5, 0.2), SVector(1.0, 1.0)]
+    @test VR.drag_point(e, 3, SVector(0.3, 2.0)) == [SVector(0.0, 0.0), SVector(0.5, 0.2), SVector(1.0, 1.0)]
+    e2 = [SVector(0.1, 0.0), SVector(0.9, 1.0)]   # end points keep their own u, also when it is not 0 / 1
+    @test VR.drag_point(e2, 1, SVector(0.5, 0.3)) == [SVector(0.1, 0.3), SVector(0.9, 1.0)]
+    @test VR.drag_point(e2, 2, SVector(0.0, 0.4)) == [SVector(0.1, 0.0), SVector(0.9, 0.4)]
+    @test VR.insert_point(e, SVector(0.25, 0.9)) == [SVector(0.0, 0.0), SVector(0.25, 0.9), SVector(0.5, 0.2), SVector(1.0, 1.0)]
+    @test VR.insert_point(e, SVector(0.75, 1.3)) == [SVector(0.0, 0.0), SVector(0.5, 0.2), SVector(0.75, 1.0), SVector(1.0, 1.0)]
+    @test e == [SVector(0.0, 0.0), SVector(0.5, 0.2), SVector(1.0, 1.0)]   # never mutated in place
+end
+
+@testitem "UI: ShowView and ShowControls frames" setup = [GLContext] begin
+    import VolumeRendering as VR, CImGui as ig
+    using AxisKeys, ColorSchemes, StaticArrays
+    ctx = ig.CreateContext()
+    @test ig.lib.ImGui_ImplOpenGL3_Init("#version 410")   # renderer backend on the hidden test context; no platform backend
+    io = ig.GetIO()
+    io.DisplaySize = ig.ImVec2(800, 600); io.DeltaTime = 1 / 60; io.IniFilename = C_NULL
+
+    xs = range(-1, 1, 8)
+    g = GridField(KeyedArray([exp(-4(x^2 + y^2 + z^2)) for x in xs, y in xs, z in xs]; x = xs, y = xs, z = xs))
+    colored = Mapped(g, Colormap(ColorSchemes.viridis, value_range(g)))
+    view = View([Volume(colored; region = Box(g)), Surface(Plane(:z, 0.0, Box(g)); color = colored, opacity = 0.5),
+                 Lines([[SVector(0.0, 0, 0), SVector(1.0, 0, 0)]]; label = "axis")]; camera = Camera(; radius = 2))
+    function frame()   # the host window fills (0, 0)–(400, 400); the image fills its content region
+        ig.lib.ImGui_ImplOpenGL3_NewFrame(); ig.NewFrame()
+        ig.SetNextWindowPos(ig.ImVec2(0, 0)); ig.SetNextWindowSize(ig.ImVec2(400, 400))
+        ig.Begin("host"); VR.ShowView(view); ig.End()
+        ig.Render(); ig.lib.ImGui_ImplOpenGL3_RenderDrawData(Ptr{Cint}(ig.GetDrawData()))
+    end
+    event(f, args...) = (f(io, args...); frame())
+
+    event(ig.AddMousePosEvent, 200, 200)
+    @test !isnothing(view.cache)                                   # rendered
+    eye, d = view.camera.eye, VR.distance(view.camera)
+    event(ig.AddMouseButtonEvent, 0, true); event(ig.AddMousePosEvent, 240, 210); event(ig.AddMouseButtonEvent, 0, false)
+    @test view.camera.eye != eye && VR.distance(view.camera) ≈ d   # left drag orbits
+    event(ig.AddMouseWheelEvent, 0, 1)
+    @test VR.distance(view.camera) ≈ d * exp(-VR.ZOOM_SPEED)        # wheel zooms
+    view.flymode = true; lookat = view.camera.lookat
+    event(ig.AddKeyEvent, ig.ImGuiKey_W, true); frame(); event(ig.AddKeyEvent, ig.ImGuiKey_W, false)
+    @test VR.distance(view.camera) ≈ d * exp(-VR.ZOOM_SPEED) && view.camera.lookat != lookat   # W flies eye and lookat together
+    view.flymode = false
+
+    lookat = view.camera.lookat
+    event(ig.AddMouseButtonEvent, 1, true); foreach(k -> event(ig.AddMousePosEvent, 200 + 10k, 210), 1:3); event(ig.AddMouseButtonEvent, 1, false)
+    @test !VR.drag_state(view).controls_open && view.camera.lookat != lookat   # a right drag pans and does not toggle
+    event(ig.AddMouseButtonEvent, 1, true); event(ig.AddMouseButtonEvent, 1, false)
+    @test VR.drag_state(view).controls_open                         # right click without drag opens the controls
+    foreach(_ -> frame(), 1:3)                                      # ShowControls: every section, incl. the extinction editor
+    VR.glcheck()
+
+    ig.lib.ImGui_ImplOpenGL3_Shutdown()
+    VR.ImPlot.DestroyContext(VR.ImPlot.GetCurrentContext())
+    ig.DestroyContext(ctx)
+    VR.free!(view)
+end
+
 @testitem "_" begin
     import Aqua
     import CompatHelperLocal as CHL
