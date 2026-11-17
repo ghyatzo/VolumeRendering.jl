@@ -84,8 +84,8 @@ tex_image(target, ifmt, sz::NTuple{1,Int}, fmt, typ, data) = GL.glTexImage1D(tar
 tex_image(target, ifmt, sz::NTuple{2,Int}, fmt, typ, data) = GL.glTexImage2D(target, 0, ifmt, sz..., 0, fmt, typ, data)
 tex_image(target, ifmt, sz::NTuple{3,Int}, fmt, typ, data) = GL.glTexImage3D(target, 0, ifmt, sz..., 0, fmt, typ, data)
 
-# `data`: an `Array{T,N}`, or C_NULL to allocate uninitialized storage
-function GLTexture{T}(size::NTuple{N,Int}, data) where {T,N}
+# `data`: the texels, or C_NULL to allocate uninitialized storage
+function GLTexture{T}(size::NTuple{N,Int}, data::Union{Array{T,N},Ptr{Cvoid}}) where {T,N}
     tex = GLTexture{T,N}(gen(GL.glGenTextures), size)
     GL.glBindTexture(gl_target(tex), tex.id)
     GL.glBindBuffer(GL.GL_PIXEL_UNPACK_BUFFER, 0)   # otherwise `data` is read as an offset into a bound buffer

@@ -299,6 +299,410 @@ end
     VR.glcheck()
 end
 
+@testitem "Camera" begin
+    import VolumeRendering as VR
+    using StaticArrays, LinearAlgebra
+
+    cam = Camera(; center = SVector(1.0, 2.0, 3.0), radius = 2)
+    @test cam.eye ≈ [5.670993664969137, 3.868397465987655, 6.269695565478396]
+    @test (cam.lookat, cam.up, cam.projection, cam.fov, cam.ortho_half) == ([1, 2, 3], [0, 0, 1], :perspective, 45.0, 2.2)
+    @test VR.distance(cam) ≈ 6
+    @test Camera(; radius = 1).lookat == [0, 0, 0]
+    right, up, fwd = VR.view_basis(cam)
+    @test [right up fwd]' * [right up fwd] ≈ I
+    @test fwd ≈ normalize(cam.lookat - cam.eye)
+
+    # looking down -z from (0, 0, 3), screen-up = +y
+    top(projection) = Camera(SVector(0.0, 0.0, 3.0), SVector(0.0, 0.0, 0.0), SVector(0.0, 1.0, 0.0), projection, 90.0, 2.0)
+    clip(cam, p) = VR.view_proj(cam, 2.0) * SVector(p..., 1.0)
+    @test VR.fovscale(top(:perspective)) ≈ 1 && VR.fovscale(top(:ortho)) == 2
+    @test clip(top(:perspective), (1, 1, 0)) ≈ [0.5, 1, 0, 3]        # w = depth along forward
+    @test clip(top(:perspective), (0, 0, 5)) ≈ [0, 0, 0, -2]         # behind the eye: w < 0
+    @test clip(top(:ortho), (1, 1, 0)) ≈ [0.25, 0.5, 0, 1]
+    @test clip(top(:ortho), (1, 1, 7)) ≈ [0.25, 0.5, 0, 1]
+    @test VR.view_proj(top(:perspective), 1.5)[3, :] == zeros(4)     # no near/far
+
+    # zoom clamps to 1e-4..1e4 × the reference's distance / ortho_half
+    ref = top(:perspective)
+    c = top(:perspective); zoom!(c, 0.5, ref)
+    @test c.eye ≈ [0, 0, 1.5] && c.lookat == [0, 0, 0]
+    zoom!(c, 1e-9, ref); @test VR.distance(c) ≈ 3e-4
+    zoom!(c, 1e20, ref); @test VR.distance(c) ≈ 3e4
+    @test c.eye ≈ [0, 0, 3e4]
+    o = top(:ortho); zoom!(o, 1e-9, top(:ortho)); @test o.ortho_half ≈ 2e-4 && o.eye == [0, 0, 3]
+    zoom!(o, 1e20, top(:ortho)); @test o.ortho_half ≈ 2e4
+
+    # reset! copies every field, the projection included
+    c = top(:ortho); c.fov = 30; c.ortho_half = 9; orbit!(c, 1, 1)
+    @test VR.reset!(c, top(:perspective)) === c
+    @test all(n -> getfield(c, n) == getfield(top(:perspective), n), fieldnames(Camera))
+
+    side() = Camera(SVector(3.0, 0.0, 0.0), SVector(0.0, 0.0, 0.0), SVector(0.0, 0.0, 1.0), :perspective, 90.0, 1.0)
+    @test orbit!(side(), π/2, 0).eye ≈ [0, 3, 0]                       # yaw about world up
+    @test orbit!(side(), 0, 0.5).eye ≈ 3 .* [cos(0.5), 0, sin(0.5)]   # pitch raises the eye
+    @test orbit!(side(), 0, 10).eye ≈ 3 .* [sin(0.02), 0, cos(0.02)]  # clamped short of the pole
+    c = flylook!(side(), π/2, 0)
+    @test c.eye == [3, 0, 0] && c.lookat ≈ [3, -3, 0]
+
+    c = top(:perspective); pan!(c, 0.5, 0.25)    # half-size of the view at the lookat = distance·tan(fov/2) = 3
+    @test c.eye ≈ [-1.5, 0.75, 3] && c.lookat ≈ [-1.5, 0.75, 0]
+    c = top(:ortho); pan!(c, 0.5, 0)
+    @test c.eye ≈ [-1, 0, 3]
+    c = top(:perspective); VR.fly!(c, 1, 0.5, 0, 2)
+    @test c.eye ≈ [1, 0, 1] && c.lookat ≈ [1, 0, -2]
+end
+
+@testitem "Texture" begin
+    import VolumeRendering as VR
+    using AxisKeys
+    A = rand(Float32, 2, 3, 4)
+    t = Texture(A)
+    @test (t.data === A, t.wrap, t.filter) == (true, (:clamp, :clamp, :clamp), :linear)
+    @test Texture(A; wrap = :repeat, filter = :nearest).wrap == (:repeat, :repeat, :repeat)
+    @test Texture(A; wrap = (:repeat, :clamp, :mirror)).wrap == (:repeat, :clamp, :mirror)
+    @test Texture(rand(3)).wrap == (:clamp,)
+    @test_throws "wrap" Texture(A; wrap = :wrap)
+    @test_throws "wrap" Texture(A; wrap = (:clamp, :clamp, :bad))
+    @test_throws MethodError Texture(A; wrap = (:clamp, :clamp))
+    @test_throws "filter" Texture(A; filter = :cubic)
+    @test_throws "3-D" Texture(rand(2, 2, 2, 2))
+    @test_throws "filter" Texture(A, (:clamp, :clamp, :clamp), :bad)   # every constructor validates
+    K = KeyedArray(A; x = 1:2, y = 1:3, z = 1:4)
+    @test VR.cache_key(K) === A
+    @test VR.cache_key(A) === A
+end
+
+@testitem "shapes" begin
+    import VolumeRendering as VR
+    using StaticArrays, IntervalSets
+
+    s = Sphere(; center = SVector(1.0, 0.0, -1.0), radius = 2)
+    @test Sphere(; radius = 1).center == [0, 0, 0]
+    @test bounds(s) == (; center = [1, 0, -1], radius = 2)
+    @test aabb(s) == (; lo = [-1, -2, -3], hi = [3, 2, 1])
+    @test uniforms(s) == (; sphere_center = [1, 0, -1], sphere_radius = 2)
+
+    b = Box(0..2, -1..1, 1..5)
+    @test b.x isa ClosedInterval{Float64}
+    @test aabb(b) == (; lo = [0, -1, 1], hi = [2, 1, 5])
+    @test bounds(b).center == [1, 0, 3] && bounds(b).radius ≈ sqrt(1 + 1 + 4)
+    @test uniforms(b) == (; box_lo = [0, -1, 1], box_hi = [2, 1, 5])
+
+    @test Plane(:x, 0.5, b) == Plane(SVector(0.5, -1, 1), SVector(0, 2, 0), SVector(0, 0, 4))
+    @test Plane(:y, 0, b) == Plane(SVector(0, 0, 1), SVector(2, 0, 0), SVector(0, 0, 4))
+    @test Plane(:z, 3, b) == Plane(SVector(0, -1, 3), SVector(2, 0, 0), SVector(0, 2, 0))
+    @test_throws ArgumentError Plane(:w, 0, b)
+    p = Plane(:z, 3, b)
+    @test aabb(p) == (; lo = [0, -1, 3], hi = [2, 1, 3])
+    @test bounds(p).center == [1, 0, 3] && bounds(p).radius ≈ sqrt(2)
+    @test uniforms(p) == (; plane_origin = [0, -1, 3], plane_u = [2, 0, 0], plane_v = [0, 2, 0])
+    # a parallelogram is enclosed through its longer diagonal
+    q = Plane(SVector(0.0, 0, 0), SVector(1.0, 0, 0), SVector(3.0, 1, 0))
+    @test bounds(q).radius ≈ sqrt(17) / 2
+    @test aabb(q) == (; lo = [0, 0, 0], hi = [4, 1, 0])
+
+    @test all(x -> occursin("vec2 vr_hit(vec3 ro, vec3 rd)", shape_glsl(x)), (s, b, p))
+    @test all(VR.isshape, (s, b, p))
+    @test !VR.isshape(1.0)
+end
+
+@testitem "GridField" begin
+    import VolumeRendering as VR
+    using AxisKeys, IntervalSets, ColorTypes, Unitful
+
+    # Cartesian, in a non-xyz dim order; :color
+    C = KeyedArray(rand(RGBA{Float32}, 4, 2, 3); z = 0:3, x = 0.0:1.0:1.0, y = 1.0:-0.25:0.5)
+    g = GridField(C)
+    @test (value_kind(g), g.interpolation) == (:color, :linear)
+    @test field_glsl(g) == """
+        vec4 value(vec3 p) {
+            vec3 idx  = vec3(((p.z) - 0.0) * 1.0, ((p.x) - 0.0) * 1.0, ((p.y) - 1.0) * -4.0);
+            vec3 dims = vec3(4.0, 2.0, 3.0);
+            return texture(grid, (idx + 0.5) / dims);
+        }
+        float stepSize(vec3 p) { return 0.25; }
+        """
+    @test Box(g) == Box(0..1, 0.5..1, 0..3)
+    @test value_range(g) == 0..1
+    @test textures(g) == (; grid = Texture(C; wrap = :clamp, filter = :linear))
+    @test uniforms(g) == (;)
+
+    # scalar, NaN-skipping value range, nearest
+    S = KeyedArray([NaN 2.0; -1.5 NaN;;; 0.5 3.0; 1.0 1.0]; x = 0:1, y = 0:1, z = 0:1)
+    s = GridField(S; interpolation = :nearest)
+    @test value_kind(s) === :scalar
+    @test value_range(s) === -1.5..3.0
+    @test textures(s).grid.filter === :nearest
+    @test endswith(split(field_glsl(s), "\n")[4], "(idx + 0.5) / dims).r;")
+
+    # (lon, lat) in both dim orders
+    lat, lon = -1.0:0.5:1.0, 0.0:0.5:1.5
+    expected_latlon = """
+        float value(vec3 p) {
+            float vr_lat = asin(clamp(p.z / length(p), -1.0, 1.0));
+            float vr_lon = 0.0 + mod(atan(p.y, p.x) - 0.0, 6.283185307179586);
+            vec2 idx  = vec2(((vr_lat) - -1.0) * 2.0, ((vr_lon) - 0.0) * 2.0);
+            vec2 dims = vec2(5.0, 4.0);
+            return texture(grid, (idx + 0.5) / dims).r;
+        }
+        float stepSize(vec3 p) { return 0.5 * length(p); }
+        """
+    ll = GridField(KeyedArray(zeros(5, 4); lat, lon))
+    @test field_glsl(ll) == expected_latlon
+    @test textures(ll).grid.wrap == (:clamp, :repeat)
+    lo = GridField(KeyedArray(zeros(4, 5); lon, lat))
+    @test field_glsl(lo) == replace(expected_latlon,
+        "vec2(((vr_lat) - -1.0) * 2.0, ((vr_lon) - 0.0) * 2.0)" => "vec2(((vr_lon) - 0.0) * 2.0, ((vr_lat) - -1.0) * 2.0)",
+        "vec2(5.0, 4.0)" => "vec2(4.0, 5.0)")
+    @test textures(lo).grid.wrap == (:repeat, :clamp)
+    @test_throws ArgumentError Box(ll)
+
+    # descending lat (IONEX), and descending lon
+    d = field_glsl(GridField(KeyedArray(zeros(9, 7); lat = 1.0:-0.25:-1.0, lon = -3.0:1.0:3.0)))
+    @test occursin("float vr_lon = -3.0 + mod(atan(p.y, p.x) - -3.0, 6.283185307179586);", d)
+    @test occursin("vec2 idx  = vec2(((vr_lat) - 1.0) * -4.0, ((vr_lon) - -3.0) * 1.0);", d)
+    @test occursin("return 0.25 * length(p);", d)
+    d = field_glsl(GridField(KeyedArray(zeros(9, 7); lat = 1.0:-0.25:-1.0, lon = 3.0:-1.0:-3.0)))
+    @test occursin("float vr_lon = 3.0 - mod(3.0 - atan(p.y, p.x), 6.283185307179586);", d)
+    @test occursin("((vr_lon) - 3.0) * -1.0", d)
+
+    # u"°" keys become radians through convert; dimensionful keys throw Julia's conversion error
+    nums(s) = parse.(Float64, getfield.(eachmatch(r"-?\d+\.\d+(?:e-?\d+)?", s), :match))
+    @test nums(axis_index_glsl((90:-2.5:-90)u"°", "vr_lat")) ≈ [1.5707963267948966, -22.918311805232932]
+    deg = GridField(KeyedArray(zeros(73, 72); lat = (90:-2.5:-90)u"°", lon = (-180:5:175)u"°"))
+    @test occursin("float vr_lon = -3.141592653589793 + mod(atan(p.y, p.x) - -3.141592653589793, 6.283185307179586);", field_glsl(deg))
+    @test nums(match(r"return (.*) \* length", field_glsl(deg))[1]) ≈ [0.04363323129985824]   # 2.5° in radians
+    km = GridField(KeyedArray(zeros(2, 2, 2); x = (0:1)u"km", y = 0:1, z = 0:1))
+    @test_throws Unitful.DimensionError field_glsl(km)
+    @test_throws Unitful.DimensionError Box(km)
+
+    # validation
+    @test_throws "dim names" GridField(KeyedArray(zeros(2, 2); x = 0:1, y = 0:1))
+    @test_throws "dim names" GridField(KeyedArray(zeros(2, 2, 2); x = 0:1, y = 0:1, r = 0:1))
+    @test_throws "interpolation" GridField(S; interpolation = :cubic)
+    @test_throws MethodError GridField(zeros(2, 2, 2))   # raw arrays are never wrapped
+    s.data = KeyedArray(zeros(2, 2); lat = 0:1, lon = 0:1)      # assignment is plain; any KeyedArray is accepted
+    @test value_kind(s) === :scalar
+end
+
+@testitem "GLSLField" begin
+    using IntervalSets
+    f = GLSLField("float value(vec3 p) { return 1.0; } float stepSize(vec3 p) { return 0.1; }")
+    @test (value_kind(f), textures(f), uniforms(f), value_range(f)) == (:scalar, (;), (;), 0..1)
+    T = Texture(rand(8))
+    f = GLSLField("…"; kind = :color, textures = (; lut = T), uniforms = (; k = 2.0), value_range = -1..1)
+    @test (field_glsl(f), value_kind(f), textures(f), uniforms(f), value_range(f)) == ("…", :color, (; lut = T), (; k = 2.0), -1.0..1.0)
+    @test_throws "kind" GLSLField(""; kind = :vector)
+end
+
+@testitem "Colormap, Mapped" begin
+    import VolumeRendering as VR
+    using IntervalSets, AxisKeys
+    c = Colormap(:viridis, 0..1)
+    @test (c.scheme, c.window, c.log) == (:viridis, 0.0..1.0, false)
+    @test Colormap(:afmhot, 1e-3..1.0; log = true).log
+    @test_throws "minimum < maximum" Colormap(:viridis, 1..1)
+    @test_throws "minimum < maximum" Colormap(:viridis, 2..1)
+    @test_throws "positive" Colormap(:viridis, 0..1; log = true)
+    @test_throws "positive" Colormap(:viridis, -1..1; log = true)
+
+    g = GridField(KeyedArray(rand(2, 2, 2); x = 0:1, y = 0:1, z = 0:1))
+    vals = [[1.0, NaN], [-2.0, 3.0, 0.5]]
+    @test Mapped(g, c).source === g
+    @test Mapped(vals, c).source === vals
+    @test value_range(vals) === -2.0..3.0
+    colorfield = GLSLField(""; kind = :color)
+    @test_throws "Mapped source" Mapped(colorfield, c)
+    @test_throws "Mapped source" Mapped(1.0, c)
+    @test_throws MethodError Mapped(g, :viridis)
+end
+
+@testitem "marks: construction and validate" begin
+    import VolumeRendering as VR
+    using AxisKeys, IntervalSets, ColorTypes, StaticArrays
+
+    g = GridField(KeyedArray(rand(2, 2, 2); x = 0:1, y = 0:1, z = 0:1))
+    rgba = GridField(KeyedArray(rand(RGBA{Float32}, 2, 2, 2); x = 0:1, y = 0:1, z = 0:1))
+    m = Mapped(g, Colormap(:viridis, 0..1))
+    box = Box(g)
+    pl = [[SVector(0.0, 0, 0), SVector(1.0, 0, 0)], [SVector(0.0, 1, 0), SVector(1.0, 1, 0), SVector(1.0, 2, 0)]]
+
+    v = Volume(m; region = box, label = "v")
+    @test (v.color, v.region, v.extinction, v.mode, v.density, v.step_scale, v.label) ==
+          (m, box, [[0, 0], [1, 1]], :dvr, 1.0, 0.5, "v")
+    @test Volume(rgba; region = Sphere(radius = 1)).color === rgba
+    @test Volume(m; region = box, mode = :mip).mode === :mip
+    @test_throws "requires a Mapped" Volume(rgba; region = box, mode = :mip)            # MIP on a colour field
+    @test_throws "Volume colour" Volume(RGB(1.0, 0, 0); region = box)                  # constant colour
+    @test_throws "Volume colour" Volume(Mapped([[1.0, 2.0]], m.colormap); region = box)
+    @test_throws "mark colour" Volume(g; region = box)                                 # bare :scalar field
+    @test_throws UndefKeywordError Volume(m)                                           # missing region
+    @test_throws "Volume region" Volume(m; region = nothing)
+    @test_throws "mode" Volume(m; region = box, mode = :max)
+    @test_throws "at least 2" Volume(m; region = box, extinction = [SVector(0.0, 0.0)])
+    @test_throws "sorted" Volume(m; region = box, extinction = [SVector(1.0, 0.0), SVector(0.0, 1.0)])
+    @test_throws "0..1" Volume(m; region = box, extinction = [SVector(0.0, 0.0), SVector(1.0, 2.0)])
+    @test Volume(rgba; region = box, extinction = SVector{2,Float64}[]).extinction == []   # only for Mapped colours
+
+    s = Surface(Sphere(radius = 1))
+    @test (s.color, s.opacity, s.label) == (RGB(0.5, 0.5, 0.55), 1.0, nothing)
+    @test Surface(box; color = m, opacity = 0.5).color === m
+    @test Surface(box; color = rgba).color === rgba
+    @test_throws "alpha-less" Surface(box; color = RGBA(1.0, 0, 0, 0.5))
+    @test_throws "Surface colour" Surface(box; color = Mapped([[1.0, 2.0]], m.colormap))
+    @test_throws "Surface colour" Surface(box; color = [[RGB(1.0, 0, 0)]])
+    @test_throws "opacity" Surface(box; opacity = 0)
+    @test_throws "opacity" Surface(box; opacity = 1.5)
+    @test_throws "Surface shape" Surface(1.0)
+
+    l = Lines(pl)
+    @test (l.polylines, l.color, l.width_px) == (pl, RGB(0.8, 0.8, 0.85), 1.0)
+    colors = [[RGB(1.0, 0, 0), RGB(0.0, 1, 0)], [RGB(0.0, 0, 1), RGB(1.0, 1, 1), RGB(0.0, 0, 0)]]
+    @test Lines(pl; color = colors).color === colors
+    @test Lines(pl; color = Mapped([[1.0, 2.0], [3.0, 4.0, 5.0]], m.colormap)).color isa Mapped
+    @test Lines(pl; color = m).color === m
+    @test Lines(pl; color = rgba).color === rgba
+    @test_throws "nesting" Lines(pl; color = [[RGB(1.0, 0, 0), RGB(0.0, 1, 0)], [RGB(0.0, 0, 1)]])
+    @test_throws "nesting" Lines(pl; color = [colors[1]])
+    @test_throws "nesting" Lines(pl; color = Mapped([[1.0, 2.0], [3.0, 4.0]], m.colormap))
+    @test_throws "alpha-less" Lines(pl; color = [[RGBA(1.0, 0, 0, 1), RGBA(0.0, 1, 0, 1)], [RGBA(0.0, 0, 1, 1) for _ in 1:3]])
+    @test_throws "width_px" Lines(pl; width_px = 0)
+    @test_throws "mark colour" Lines(pl; color = g)
+
+    # validation runs at construction and render, never on assignment
+    v.mode = :average; v.color = rgba
+    @test_throws "requires a Mapped" VR.validate(v)
+    s.color = m
+    m.colormap.log = true                               # window 0..1: invariant violated, caught at render
+    @test_throws "positive" VR.validate(s)
+    m.colormap.log = false; m.source = rgba
+    @test_throws "Mapped source" VR.validate(s)
+
+    @test VR.jittered(Volume(Mapped(g, Colormap(:viridis, 0..1)); region = box))
+    @test !VR.jittered(l) && !VR.jittered(Surface(box))
+end
+
+@testitem "GLSL identifiers" begin
+    import VolumeRendering as VR
+    using StaticArrays, IntervalSets
+    @test VR.check_identifier(:rho) === :rho
+    @test all(n -> VR.check_identifier(n) === n, [:_a, :A9_b, :Rt, :x_])
+    for (bad, msg) in [(Symbol("9a"), "invalid"), (Symbol("a-b"), "invalid"), (Symbol(""), "invalid"), (Symbol("a b"), "invalid"),
+                       (:ρ, "invalid"), (:naïve, "invalid"), (Symbol("a\n"), "invalid"),
+                       (:vr_cmap, "vr_"), (:gl_Position, "gl_"), (:a__b, "__"), (:__a, "__"),
+                       (:filter, "keyword"), (:sample, "keyword"), (:in, "keyword"), (:output, "keyword"),
+                       (:row_major, "keyword"), (:float, "keyword"), (:precise, "keyword"),
+                       (:value, "renderer"), (:stepSize, "renderer"), (:main, "renderer")]
+        @test_throws msg VR.check_identifier(bad)
+    end
+
+    # user-defined objects follow the same rules as the built-ins
+    struct Obj; t::NamedTuple; u::NamedTuple; end
+    VR.textures(o::Obj) = o.t
+    VR.uniforms(o::Obj) = o.u
+    T = Texture(rand(2))
+    sphere = Sphere(radius = 1)
+    @test isnothing(VR.check_declared_names([Obj((; lut = T), (; k = 1.0)), sphere]))
+    @test_throws "vr_" VR.check_declared_names([Obj((;), (; vr_k = 1.0))])
+    @test_throws "keyword" VR.check_declared_names([Obj((; filter = T), (;))])
+    @test_throws "twice" VR.check_declared_names([Obj((; k = T), (; k = 1.0))])
+    err = try VR.check_declared_names([Obj((;), (; sphere_radius = 1.0)), sphere]) catch e; e end
+    @test err isa ArgumentError && occursin("Obj", err.msg) && occursin("Sphere", err.msg)
+    # a field and a shape assembled into one program
+    field = GLSLField(""; textures = (; lut = T), uniforms = (; box_lo = 1.0))
+    err = try VR.check_declared_names([field, Box(0..1, 0..1, 0..1)]) catch e; e end
+    @test err isa ArgumentError && occursin("box_lo", err.msg) && occursin("GLSLField", err.msg) && occursin("Box", err.msg)
+end
+
+@testitem "View" begin
+    import VolumeRendering as VR
+    using StaticArrays, ColorTypes
+    cam = Camera(; radius = 2)
+    s = Surface(Sphere(radius = 1))
+    v = View([s]; camera = cam)
+    @test v.marks == [s] && v.marks isa Vector{Any}
+    @test v.camera === cam && v.initial_camera !== cam && v.initial_camera.eye == cam.eye
+    @test (v.background, v.max_volume_px, v.refine_frames, v.flymode) == (RGB(0, 0, 0), 2048, 16, false)
+    @test v.fly_speed ≈ 6 / 200
+    @test isnothing(v.cache) && isnothing(v.last) && v.nsamp == 0          # construction allocates no GL resources
+    cam.projection = :ortho
+    @test VR.default_fly_speed(cam) ≈ 2.2 / 200
+    orbit!(cam, 1, 1); zoom!(cam, 3, v.initial_camera)
+    @test reset!(v) === v && v.camera === cam                            # restored in place
+    @test all(n -> getfield(cam, n) == getfield(Camera(; radius = 2), n), fieldnames(Camera))
+    @test View(Any[]; camera = cam, fly_speed = 1, refine_frames = 1).fly_speed == 1
+end
+
+@testitem "snapshot" begin
+    import VolumeRendering as VR
+    using AxisKeys, IntervalSets, ColorTypes, StaticArrays
+
+    grid(n) = KeyedArray(rand(Float32, n, n, n); x = 1:n, y = 1:n, z = 1:n)
+    pl, vals = [[SVector(0.0, 0, 0), SVector(1.0, 0, 0)]], [[NaN, 1.0]]
+    function scene(A)
+        g = GridField(A)
+        m = Mapped(g, Colormap(:viridis, 0..1))
+        vol = Volume(m; region = Box(g))
+        sl = Surface(Plane(:z, 2, Box(g)); color = m)
+        ln = Lines(pl; color = Mapped(vals, m.colormap))
+        (; view = View([vol, sl, ln]; camera = Camera(; bounds(vol.region)...)), g, m, vol, sl, ln)
+    end
+    snap(view) = VR.snapshot(view, 64, 48)
+    same(f) = (s0 = snap(sc.view); f(); isequal(s0, snap(sc.view)))
+
+    A = grid(4)
+    sc = scene(A)
+    @test isequal(snap(sc.view), snap(sc.view))                     # NaN leaves compare equal to themselves
+    @test isequal(snap(sc.view), snap(scene(A).view))               # equal values, distinct objects (same bulk arrays)
+    @test !isequal(VR.snapshot(sc.view, 64, 48), VR.snapshot(sc.view, 65, 48))
+    @test same(() -> sc.m.colormap = Colormap(:viridis, 0..1))       # equal values → equal
+    @test same(() -> sc.g.data = KeyedArray(A; x = 1:4, y = 1:4, z = 1:4))   # new wrapper, same parent array
+    @test same(() -> A[1] = 99)                                      # in-place edit: undetected (documented)
+    @test same(() -> sc.ln.polylines[1][1] = SVector(5.0, 0, 0))
+    @test !same(() -> sc.g.data = grid(4))                           # new array
+    @test !same(() -> sc.ln.polylines = [[SVector(0.0, 0, 0), SVector(1.0, 0, 0)]])
+    @test !same(() -> sc.ln.color.source = [[NaN, 1.0]])
+    @test !same(() -> sc.m.colormap.window = 0..2)
+    @test !same(() -> sc.m.colormap.log = true)
+    @test !same(() -> sc.g.interpolation = :nearest)
+    @test !same(() -> sc.vol.extinction[2] = SVector(1.0, 0.5))     # by value, also in place
+    @test !same(() -> sc.vol.region = Box(0..1, 0..1, 0..1))
+    @test !same(() -> sc.sl.shape = Plane(:z, 3, sc.vol.region))
+    @test !same(() -> sc.sl.opacity = 0.5)
+    @test !same(() -> orbit!(sc.view.camera, 0.1, 0))
+    @test !same(() -> sc.view.flymode = true)
+    @test !same(() -> push!(sc.view.marks, Surface(Sphere(radius = 1))))
+    @test same(() -> sc.vol.label = "volume")                        # labels are UI only
+
+    # cost O(marks): independent of the grid size
+    small, large = scene(grid(4)).view, scene(grid(160)).view
+    t(view) = minimum(_ -> @elapsed(snap(view)), 1:300)
+    t(small); t(large)
+    @test t(large) < 3 * t(small)
+end
+
+@testitem "generated GLSL compiles" setup = [GLContext] begin
+    import ModernGL as GL, VolumeRendering as VR
+    using AxisKeys, ColorTypes, StaticArrays, IntervalSets
+    compile(src) = (s = VR.compile_shader(GL.GL_FRAGMENT_SHADER, "#version 410 core\n" * src); GL.glDeleteShader(s); true)
+    shape_decls = [(Sphere(radius = 1), "uniform vec3 sphere_center; uniform float sphere_radius;"),
+                   (Box(0..1, 0..1, 0..1), "uniform vec3 box_lo, box_hi;"),
+                   (Plane(:x, 0.5, Box(0..1, 0..1, 0..1)), "uniform vec3 plane_origin, plane_u, plane_v;")]
+    for (s, decls) in shape_decls
+        @test compile("$decls\n$(shape_glsl(s))\nout vec4 frag; void main() { frag = vec4(vr_hit(vec3(0.0), vec3(1.0, 0.0, 0.0)), 0.0, 1.0); }")
+    end
+    fields = [GridField(KeyedArray(rand(2, 3, 4); z = 0:1, x = 0.0:0.5:1.0, y = 4.0:-1.0:1.0)),
+              GridField(KeyedArray(rand(RGBA{Float32}, 2, 2, 2); x = 0:1, y = 0:1, z = 0:1)),
+              GridField(KeyedArray(rand(3, 4); lat = 1.0:-1.0:-1.0, lon = 0.0:1.5:4.5)),
+              GridField(KeyedArray(rand(4, 3); lon = 3.0:-2.0:-3.0, lat = -1.0:1.0:1.0))]
+    for f in fields
+        sampler = ndims(f.data) == 3 ? "sampler3D" : "sampler2D"
+        out = value_kind(f) === :color ? "value(p)" : "vec4(value(p))"
+        @test compile("uniform $sampler grid;\n$(field_glsl(f))\nout vec4 frag; void main() { vec3 p = vec3(1.0); frag = $out + stepSize(p); }")
+    end
+    VR.glcheck()
+end
+
 @testitem "_" begin
     import Aqua
     import CompatHelperLocal as CHL

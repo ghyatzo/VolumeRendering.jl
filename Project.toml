@@ -4,14 +4,22 @@ authors = ["Alexander Plavin <alexander@plav.in>"]
 version = "0.1.1"
 
 [deps]
+AxisKeys = "94b1ba4f-4ee9-5380-92f1-94cde586c3c5"
 ColorTypes = "3da002f7-5984-5a60-b8a6-cbb66c0b333f"
 FixedPointNumbers = "53c48c17-4a7d-5ca2-90c5-79b7896eea93"
+IntervalSets = "8197267c-284f-5f27-9208-e0e47529a953"
+LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
 ModernGL = "66fc600b-dfda-50eb-8b99-91cfa97b1301"
+Rotations = "6038ab10-8711-5258-84ad-4b1120ba62dc"
 StaticArrays = "90137ffa-7385-5640-81b9-e52037218182"
 
 [compat]
+AxisKeys = "0.2.17"
 ColorTypes = "0.12.1"
 FixedPointNumbers = "0.8"
+IntervalSets = "0.7.15"
+LinearAlgebra = "1.10"
 ModernGL = "1.1.8"
+Rotations = "1.7.1"
 StaticArrays = "1.9.18"
 julia = "1.10"
