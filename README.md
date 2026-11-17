@@ -32,7 +32,7 @@ VolumeRendering.ShowView(view)
 
 The host's GL context must be OpenGL 4.1 core: pass `opengl_version = v"4.1"` to `CImGui.render`, see [demo.jl](examples/demo.jl).
 
-`ShowView` fills the current content region with the rendered view and turns mouse/keyboard into camera motion: drag to orbit, right/middle drag to pan, wheel to zoom; with `view.flymode = true`, drag looks around and WASD/Space/C fly. There is no window or render-loop boilerplate of our own — you drive the ImGui frame like you already do for any other widget.
+`ShowView` fills the current content region with the rendered view and turns mouse/keyboard into camera motion: drag to orbit, right/middle drag to pan, wheel to zoom; with `view.flymode = true`, drag looks around and WASD/Space/C fly. Right-click opens the view's controls panel. There is no window or render-loop boilerplate of our own — you drive the ImGui frame like you already do for any other widget.
 
 # Concepts
 
