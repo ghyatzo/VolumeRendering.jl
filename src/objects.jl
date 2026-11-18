@@ -405,20 +405,38 @@ function Plane(axis::Symbol, pos::Real, box::Box)
     Plane(setindex(lo, pos, i), edge(j), edge(k))
 end
 
+"""    Clipped(shape, box::Box)
+
+The surface of `shape` clipped to `box`: a ray whose near hit with `shape` lies outside `box` falls back to its far
+hit, so the back wall of a closed shape remains visible through a clipped front cap.
+"""
+struct Clipped{S}
+    shape::S
+    box::Box
+
+    function Clipped(shape::S, box::Box) where {S}
+        isshape(shape) || throw(ArgumentError("Clipped shape must implement the shape interface (shape_glsl, bounds, aabb), got $(summary(shape))"))
+        new{S}(shape, box)
+    end
+end
+
 uniforms(s::Sphere) = (; sphere_center = s.center, sphere_radius = s.radius)
 uniforms(b::Box) = (; box_lo = aabb(b).lo, box_hi = aabb(b).hi)
 uniforms(p::Plane) = (; plane_origin = p.origin, plane_u = p.u, plane_v = p.v)
+uniforms(c::Clipped) = merge(uniforms(c.shape), (; clip_lo = aabb(c.box).lo, clip_hi = aabb(c.box).hi))
 
 bounds(s::Sphere) = (; s.center, s.radius)
 bounds(b::Box) = let (; lo, hi) = aabb(b); (; center = (lo + hi) / 2, radius = norm(hi - lo) / 2) end
 # the longer diagonal, so that a non-rectangular parallelogram is enclosed too
 bounds(p::Plane) = (; center = p.origin + (p.u + p.v) / 2, radius = max(norm(p.u + p.v), norm(p.u - p.v)) / 2)
+bounds(c::Clipped) = let (; lo, hi) = aabb(c); (; center = (lo + hi) / 2, radius = norm(max.(hi - lo, 0.0)) / 2) end
 
 aabb(s::Sphere) = (; lo = s.center .- s.radius, hi = s.center .+ s.radius)
 aabb(b::Box) = (; lo = SVector(minimum.((b.x, b.y, b.z))), hi = SVector(maximum.((b.x, b.y, b.z))))
 aabb(p::Plane) = let corners = (p.origin, p.origin + p.u, p.origin + p.v, p.origin + p.u + p.v)
     (; lo = min.(corners...), hi = max.(corners...))
 end
+aabb(c::Clipped) = let s = aabb(c.shape), b = aabb(c.box); (; lo = max.(s.lo, b.lo), hi = min.(s.hi, b.hi)) end
 
 shape_glsl(::Sphere) = """
     vec2 vr_hit(vec3 ro, vec3 rd) {
@@ -448,6 +466,25 @@ shape_glsl(::Plane) = """
         float t = dot(plane_origin - ro, n) / dn; vec3 q = ro + rd * t - plane_origin;
         float s = dot(q, plane_u) / dot(plane_u, plane_u), w = dot(q, plane_v) / dot(plane_v, plane_v);
         return (s < 0.0 || s > 1.0 || w < 0.0 || w > 1.0) ? vec2(1e30, -1e30) : vec2(t, t);
+    }
+    """
+
+shape_glsl(c::Clipped) = """
+    $(replace(shape_glsl(c.shape), "vr_hit" => "vr_unclipped_hit"))
+    vec2 vr_hit(vec3 ro, vec3 rd) {
+        vec2 h = vr_unclipped_hit(ro, rd);
+        if (h.y < h.x) return vec2(1e30, -1e30);
+        float cn = -1e30, cf = 1e30;
+        for (int i = 0; i < 3; i++) {
+            if (rd[i] == 0.0) { if (ro[i] < clip_lo[i] || ro[i] > clip_hi[i]) return vec2(1e30, -1e30); }
+            else { float t0 = (clip_lo[i] - ro[i]) / rd[i], t1 = (clip_hi[i] - ro[i]) / rd[i];
+                   cn = max(cn, min(t0, t1)); cf = min(cf, max(t0, t1)); }
+        }
+        if (cf < cn) return vec2(1e30, -1e30);
+        float t = h.x;
+        if (t <= 0.0 || t < cn || t > cf) t = h.y;
+        if (t <= 0.0 || t < cn || t > cf) return vec2(1e30, -1e30);
+        return vec2(t, t);
     }
     """
 

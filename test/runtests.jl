@@ -581,7 +581,7 @@ end
     for interp in (:nearest, :linear),
         make_mark in (f -> Volume(Mapped(f, cmapB); region = Box(f), mode = :mip),
                       f -> Surface(Plane(:z, 0.35, Box(f)); color = Mapped(f, cmapB)),
-                      f -> Surface(Sphere(radius = 0.7); color = Mapped(f, cmapB)))
+                      f -> Surface(Clipped(Sphere(radius = 0.7), Box(f)); color = Mapped(f, cmapB)))
         gB.interpolation = tB.interpolation = interp
         plain = render_image(View([make_mark(gB)]; camera = top, refine_frames = 1), 96, 96)
         bricks = render_image(View([make_mark(tB)]; camera = top, refine_frames = 1), 96, 96)
@@ -589,6 +589,49 @@ end
                                         abs(Int(reinterpret(a.g)) - Int(reinterpret(b.g))),
                                         abs(Int(reinterpret(a.b)) - Int(reinterpret(b.b)))), plain, bricks)) <= 1
     end
+    VR.glcheck()
+end
+
+@testitem "Clipped" setup = [GLContext] begin
+    import ModernGL as GL, VolumeRendering as VR
+    using IntervalSets, LinearAlgebra, StaticArrays
+
+    sbox = Box(-12..12, -12..12, -5..5)
+    @test_throws "Clipped shape" Clipped(1.0, sbox)
+    cs = Clipped(Sphere(radius = 10.0), sbox)
+    @test aabb(cs) == (; lo = [-10, -10, -5], hi = [10, 10, 5])
+    @test bounds(cs).center == [0, 0, 0] && bounds(cs).radius ≈ norm(SVector(10.0, 10.0, 5.0))
+
+    # equatorial band from above, from the side, and from inside
+    sw = 128
+    pixels = range(-12 + 12 / sw, 12 - 12 / sw; length = sw)
+    radius2 = [x^2 + y^2 for y in reverse(pixels), x in pixels]
+    ring = (75 .<= radius2) .& (radius2 .< 100)
+    band = [x^2 + z^2 < 100 && abs(z) <= 5 for z in reverse(pixels), x in pixels]
+    sdepth(shape; eye = SVector(0.0, 0.0, 30.0), lookat = SVector(0.0, 0.0, 0.0), up = SVector(0.0, 1.0, 0.0)) =
+        VR.depth_image(View([Surface(shape)]; camera = Camera(eye, lookat, up, :ortho, 45.0, 12.0), refine_frames = 1), sw, sw)
+
+    @test (sdepth(cs) .> 0) == ring
+    @test (sdepth(cs; eye = SVector(0.0, 30.0, 0.0), up = SVector(0.0, 0.0, 1.0)) .> 0) == band
+    @test (sdepth(cs; eye = SVector(0.0, 0.0, 0.0), lookat = SVector(0.0, 1.0, 0.0), up = SVector(0.0, 0.0, 1.0)) .> 0) == band
+
+    # back wall visible through the clipped front cap (sphere centered at z = 2, clipped to z ∈ [-5, 5])
+    shifted = Clipped(Sphere(; center = SVector(0.0, 0.0, 2.0), radius = 10.0), sbox)
+    dep = sdepth(shifted)
+    visible = (51 .<= radius2) .& (radius2 .< 100)
+    @test (dep .> 0) == visible
+    near = 1e-6 * 12.0
+    expected_dep = zeros(Float32, sw, sw)
+    for I in CartesianIndices(expected_dep)
+        visible[I] || continue
+        height = sqrt(100 - radius2[I])
+        zhit = height <= 3 ? 2 + height : 2 - height
+        expected_dep[I] = near / (30.0 - zhit)
+    end
+    @test maximum(abs.(dep .- expected_dep)) <= 1e-9
+
+    # small box inside the sphere misses completely
+    @test all(iszero, sdepth(Clipped(Sphere(radius = 10.0), Box(-2..2, -2..2, -2..2))))
     VR.glcheck()
 end
 
