@@ -385,9 +385,10 @@ grid_box(::LonLat, A) = throw(ArgumentError("Box(::GridField) needs a Cartesian 
 
 """    Plane(origin, u, v)
     Plane(axis::Symbol, pos, box::Box)
+    Plane(normal, pos, box::Box)
 
-A flat parallelogram shape `{origin + s·u + t·v : s, t ∈ [0, 1]}`, or the cross-section of `box` at `axis = pos`
-(`axis` is `:x`, `:y` or `:z`).
+A flat parallelogram shape `{origin + s·u + t·v : s, t ∈ [0, 1]}`, the cross-section of `box` at `axis = pos`
+(`axis` is `:x`, `:y` or `:z`), or the oblique plane `dot(normalize(normal), p) = pos` clipped to `box`.
 """
 struct Plane
     origin::SVector{3,Float64}
@@ -418,6 +419,24 @@ struct Clipped{S}
         isshape(shape) || throw(ArgumentError("Clipped shape must implement the shape interface (shape_glsl, bounds, aabb), got $(summary(shape))"))
         new{S}(shape, box)
     end
+end
+
+function Plane(normal::Union{AbstractVector{<:Real},NTuple{3,Real}}, pos::Real, box::Box)
+    n = SVector{3,Float64}(normal)
+    mag = norm(n)
+    isfinite(mag) && mag > 0 || throw(ArgumentError("Plane normal must be finite and nonzero, got $normal"))
+    isfinite(pos) || throw(ArgumentError("Plane pos must be finite, got $pos"))
+    n /= mag
+    ref = abs(n[3]) < 0.9 ? SVector(0.0, 0.0, 1.0) : SVector(0.0, 1.0, 0.0)
+    u = normalize(cross(n, ref))
+    v = cross(n, u)
+    (; lo, hi) = aabb(box)
+    center = (lo + hi) / 2
+    origin = center + n * (Float64(pos) - dot(n, center))
+    halfsize = (hi - lo) / 2
+    u *= dot(abs.(u), halfsize)
+    v *= dot(abs.(v), halfsize)
+    Clipped(Plane(origin - u - v, 2u, 2v), box)
 end
 
 uniforms(s::Sphere) = (; sphere_center = s.center, sphere_radius = s.radius)

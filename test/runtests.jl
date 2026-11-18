@@ -635,6 +635,66 @@ end
     VR.glcheck()
 end
 
+@testitem "oblique Plane" setup = [GLContext] begin
+    import ModernGL as GL, VolumeRendering as VR
+    using AxisKeys, ColorSchemes, ColorTypes, FixedPointNumbers, IntervalSets, LinearAlgebra, StaticArrays
+
+    box = Box(-1..1, -1..1, -1..1)
+    c = Plane(SVector(1.0, 2.0, 3.0), 0.25, box)
+    n = normalize(SVector(1.0, 2.0, 3.0))
+    for pt in (c.shape.origin, c.shape.origin + c.shape.u, c.shape.origin + c.shape.v, c.shape.origin + c.shape.u + c.shape.v)
+        @test dot(n, pt) ≈ 0.25
+    end
+    @test all(aabb(c).lo .>= -1) && all(aabb(c).hi .<= 1)
+    @test aabb(Plane(SVector(1.0, 1.0, 1.0), 0.0, box)) == (; lo = [-1, -1, -1], hi = [1, 1, 1])
+    @test_throws "normal must be finite and nonzero" Plane(SVector(0.0, 0.0, 0.0), 0.0, box)
+    @test_throws "normal must be finite and nonzero" Plane(SVector(NaN, 0.0, 1.0), 0.0, box)
+    @test_throws "pos must be finite" Plane(SVector(0.0, 0.0, 1.0), Inf, box)
+
+    w = 80
+    xyz = -1.0:0.1:1.0
+    A = KeyedArray(Float32[x + 2y + 3z + 10 for x in xyz, y in xyz, z in xyz]; x = xyz, y = xyz, z = xyz)
+    gf = GridField(A)
+    tf = TiledField(A; maxdim = 12)
+    cmap = Colormap(ColorSchemes.viridis, value_range(gf))
+
+    function axis_cam(axis; half = 1.5, d = 3.0)
+        eye = SVector(ntuple(i -> i == axis ? d : 0.0, 3))
+        up = axis == 3 ? SVector(0.0, 1.0, 0.0) : SVector(0.0, 0.0, 1.0)
+        Camera(eye, SVector(0.0, 0.0, 0.0), up, :ortho, 45.0, half)
+    end
+    function plane_points(cam)
+        right, up, _ = VR.view_basis(cam)
+        xs = [((col - 0.5) / w * 2 - 1) * cam.ortho_half for col in 1:w]
+        ys = [(1 - (row - 0.5) / w * 2) * cam.ortho_half for row in 1:w]
+        [cam.lookat + x * right + y * up for y in ys, x in xs]
+    end
+    buffers(marks, cam) = (v = View(marks; camera = cam, refine_frames = 1); (render_image(v, w, w), VR.depth_image(v, w, w)))
+
+    # axis presets and custom normals agree
+    for (i, axis) in enumerate((:x, :y, :z))
+        cam = axis_cam(i)
+        nvec = SVector(ntuple(j -> Float64(j == i), 3))
+        @test buffers([Surface(Plane(axis, 0.2, box); color = Mapped(gf, cmap))], cam) ==
+              buffers([Surface(Plane(nvec, 0.2, box); color = Mapped(gf, cmap))], cam)
+    end
+
+    # oblique (1, 1, 1) plane clips strictly to box
+    ocam = Camera(SVector(3.0, 3.0, 3.0), SVector(0.0, 0.0, 0.0), SVector(0.0, 0.0, 1.0), :ortho, 45.0, 1.5)
+    oplane = Plane(SVector(1.0, 1.0, 1.0), 0.0, box)
+    img, dep = buffers([Surface(oplane; color = Mapped(gf, cmap))], ocam)
+    expected = map(p -> all(abs.(p) .<= 1), plane_points(ocam))
+    @test any(expected) && !all(expected)
+    @test (dep .> 0) == expected
+    @test any(!=(RGB{N0f8}(0, 0, 0)), img[expected])
+    @test all(==(RGB{N0f8}(0, 0, 0)), img[.!expected])
+    @test buffers([Surface(oplane; color = Mapped(tf, cmap))], ocam) == (img, dep)
+    revA = KeyedArray(reverse(parent(A); dims = 3); x = xyz, y = xyz, z = reverse(xyz))
+    @test buffers([Surface(oplane; color = Mapped(GridField(revA), cmap))], ocam) == (img, dep)
+    @test all(iszero, buffers([Surface(Plane(SVector(1.0, 1.0, 1.0), 5.0, box); color = Mapped(gf, cmap))], ocam)[2])
+    VR.glcheck()
+end
+
 @testitem "Colormap, Mapped" begin
     using ColorSchemes
     import VolumeRendering as VR
