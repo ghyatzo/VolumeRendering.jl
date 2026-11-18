@@ -196,7 +196,7 @@ end
 controls!(m::Surface) = (CImGui.SetNextItemWidth(half_width()); slider!(m, :opacity, "##opacity", 0.01, 1, "opacity: %.2f"))
 controls!(m::Lines) = (CImGui.SetNextItemWidth(half_width()); slider!(m, :width_px, "##width", 0.5, 20, "width: %.1f px"; log = true))
 
-controls!(f::GridField) = let v = checkbox("linear interpolation", f.interpolation === :linear)
+controls!(f::Union{GridField,TiledField}) = let v = checkbox("linear interpolation", f.interpolation === :linear)
     isnothing(v) || (f.interpolation = v ? :linear : :nearest)
 end
 

@@ -501,6 +501,97 @@ end
     @test_throws "kind" GLSLField(""; kind = :vector)
 end
 
+@testitem "TiledField" setup = [GLContext] begin
+    import ModernGL as GL, VolumeRendering as VR
+    using AxisKeys, ColorSchemes, ColorTypes, FixedPointNumbers, IntervalSets, StaticArrays
+
+    # brick geometry and shared boundary texels
+    for dims in ((8, 2, 2), (7, 2, 2), (9, 2, 2), (3, 8, 2), (3, 2, 8), (9, 7, 3))
+        data = reshape(Float32.(1:prod(dims)), dims)
+        field = KeyedArray(data; x = 1:dims[1], y = 1:dims[2], z = 1:dims[3])
+        tiled = TiledField(field; maxdim = 4)
+        @test all(<=(4), tiled.D)
+        for I in CartesianIndices(data)
+            mapped = ntuple(d -> VR._map_axis(tiled, d, I[d] - 1), 3)
+            brick = ntuple(d -> mapped[d][1], 3)
+            local_index = ntuple(d -> Int(mapped[d][2]) + 1, 3)
+            @test VR.brick_data(tiled, brick)[local_index...] == data[I]
+        end
+        for d in 1:3
+            tiled.k[d] > 1 || continue
+            a = VR.brick_data(tiled, (0, 0, 0))
+            b = VR.brick_data(tiled, ntuple(i -> Int(i == d), 3))
+            @test selectdim(a, d, tiled.D[d]) == selectdim(b, d, 1)
+        end
+    end
+
+    # pre-materialized bricks: textures(t) returns identical array references across calls and interpolation toggles
+    dims = (64, 48, 8)
+    data = reshape(Float32.(1:prod(dims)), dims)
+    tiled = TiledField(KeyedArray(data; x = 1:dims[1], y = 1:dims[2], z = 1:dims[3]); maxdim = 32)
+    brick = VR.brick_data(tiled, (0, 0, 0))
+    @test brick == data[1:tiled.D[1], 1:tiled.D[2], 1:tiled.D[3]]
+    @test (@allocated VR.brick_data(tiled, (0, 0, 0))) <= 2sizeof(brick) + 16_384
+    tex1 = textures(tiled)
+    tiled.interpolation = :nearest
+    tex2 = textures(tiled)
+    @test map(t -> t.data, tex1) === map(t -> t.data, tex2)
+    @test all(t -> t.filter === :nearest, values(tex2))
+    tiled.interpolation = :linear
+    @test (value_kind(tiled), value_range(tiled), Box(tiled)) == (:scalar, 1.0..Float64(prod(dims)), Box(1..64, 1..48, 1..8))
+    @test applicable(VR.controls!, tiled)
+
+    # validation: maxdim, empty axes, > 13 bricks, non-Cartesian, interpolation
+    small = KeyedArray(ones(Float32, 2, 2, 2); x = 1:2, y = 1:2, z = 1:2)
+    @test_throws "maxdim must be at least 2" TiledField(small; maxdim = 1)
+    @test_throws "axes must not be empty" TiledField(KeyedArray(zeros(Float32, 0, 2, 2); x = 1:0, y = 1:2, z = 1:2))
+    @test_throws "maximum of 13" TiledField(KeyedArray(ones(Float32, 5, 5, 5); x = 1:5, y = 1:5, z = 1:5); maxdim = 2)
+    @test_throws "Cartesian" TiledField(KeyedArray(ones(Float32, 4, 4); lat = 1:4, lon = 1:4))
+    @test_throws "interpolation" TiledField(small; interpolation = :cubic)
+
+    # rays crossing tiles match a single texture within 1 LSB across modes, orientations, and filters
+    dims = (9, 7, 9)
+    A = KeyedArray([Float32(0.1 + 0.3sin(i)^2 + 0.3cos(j)^2 + 0.3sin(k)^2)
+                    for i in 1:dims[1], j in 1:dims[2], k in 1:dims[3]];
+                   x = range(-1, 1; length = dims[1]), y = range(-1, 1; length = dims[2]), z = range(-1, 1; length = dims[3]))
+    gf = GridField(A)
+    tf = TiledField(A; maxdim = 6)
+    @test tf.k == (2, 2, 2)
+    cmap = Colormap(ColorSchemes.viridis, value_range(gf))
+    box = Box(gf)
+    for eye in ((3.0, 0.0, 0.0), (-3.0, 0.0, 0.0), (0.0, 3.0, 0.0), (0.0, -3.0, 0.0),
+                (0.0, 0.0, 3.0), (0.0, 0.0, -3.0), (3.0, 3.0, 3.0), (-3.0, -3.0, -3.0)),
+        mode in (:dvr, :mip, :average), interp in (:nearest, :linear)
+        gf.interpolation = tf.interpolation = interp
+        up = abs(eye[3]) > abs(eye[2]) ? SVector(0.0, 1.0, 0.0) : SVector(0.0, 0.0, 1.0)
+        cam = Camera(SVector(eye), SVector(0.0, 0.0, 0.0), up, :ortho, 45.0, 0.81)
+        plain = render_image(View([Volume(Mapped(gf, cmap); region = box, mode)]; camera = cam, refine_frames = 1), 32, 32)
+        bricks = render_image(View([Volume(Mapped(tf, cmap); region = box, mode)]; camera = cam, refine_frames = 1), 32, 32)
+        @test maximum(map((a, b) -> max(abs(Int(reinterpret(a.r)) - Int(reinterpret(b.r))),
+                                        abs(Int(reinterpret(a.g)) - Int(reinterpret(b.g))),
+                                        abs(Int(reinterpret(a.b)) - Int(reinterpret(b.b)))), plain, bricks)) <= 1
+    end
+
+    # sampling matches a single texture on Volume, Plane Surface, and Sphere Surface
+    B = KeyedArray([Float32(isodd(i) + j / 70 + k / 30) for i in 1:9, j in 1:7, k in 1:3];
+                   x = range(-1, 1; length = 9), y = range(-1, 1; length = 7), z = -1:1)
+    gB, tB = GridField(B), TiledField(B; maxdim = 6)
+    cmapB = Colormap(ColorSchemes.viridis, value_range(gB))
+    top = GLContext.topcam(1.2)
+    for interp in (:nearest, :linear),
+        make_mark in (f -> Volume(Mapped(f, cmapB); region = Box(f), mode = :mip),
+                      f -> Surface(Plane(:z, 0.35, Box(f)); color = Mapped(f, cmapB)),
+                      f -> Surface(Sphere(radius = 0.7); color = Mapped(f, cmapB)))
+        gB.interpolation = tB.interpolation = interp
+        plain = render_image(View([make_mark(gB)]; camera = top, refine_frames = 1), 96, 96)
+        bricks = render_image(View([make_mark(tB)]; camera = top, refine_frames = 1), 96, 96)
+        @test maximum(map((a, b) -> max(abs(Int(reinterpret(a.r)) - Int(reinterpret(b.r))),
+                                        abs(Int(reinterpret(a.g)) - Int(reinterpret(b.g))),
+                                        abs(Int(reinterpret(a.b)) - Int(reinterpret(b.b)))), plain, bricks)) <= 1
+    end
+    VR.glcheck()
+end
+
 @testitem "Colormap, Mapped" begin
     using ColorSchemes
     import VolumeRendering as VR

@@ -280,8 +280,6 @@ end
 
 # ── draws ──
 
-const MAX_SAMPLERS = 16   # GL_MAX_TEXTURE_IMAGE_UNITS on macOS GL 4.1
-
 # a framebuffer attachment of the view, bound like a texture; owned by the view, not a cache entry. Resolved at
 # draw time: the framebuffers are (re)sized after the plan is built
 struct Attachment

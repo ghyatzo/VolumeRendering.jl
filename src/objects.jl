@@ -60,6 +60,9 @@ Textures of a field, as `name => Texture`; each is declared for its GLSL as `uni
 none. Return the same `Texture` arrays every call: uploads are cached by array identity. A program has at most 16
 samplers, the renderer's own included.
 """
+const MAX_SAMPLERS = 16   # GL_MAX_TEXTURE_IMAGE_UNITS on macOS GL 4.1
+const MAX_BRICKS = MAX_SAMPLERS - 3   # leaves units for vr_cmap, vr_extinction, vr_scene_depth
+
 textures(_) = (;)
 
 """    uniforms(x)::NamedTuple
@@ -205,6 +208,124 @@ value_range(f::GridField) = data_range(f.data)
 data_range(A::AbstractArray{<:Colorant}) = 0.0..1.0
 data_range(A::AbstractArray{<:Real}) = nan_extrema(A)
 
+# ── TiledField ──
+
+"""    TiledField(A::KeyedArray; interpolation = :linear, maxdim = 2048)
+
+A Cartesian `(x, y, z)` grid field split into overlapping 3-D texture bricks of at most `maxdim` texels per axis, so
+grids larger than `GL_MAX_3D_TEXTURE_SIZE` render at full resolution with seamless `:linear` filtering across brick
+boundaries. At most $MAX_BRICKS bricks may be used.
+
+Mutable: assign `t.data`, `t.interpolation` or `t.maxdim`.
+"""
+mutable struct TiledField
+    data::KeyedArray
+    interpolation::Symbol
+    maxdim::Int
+    k::NTuple{3,Int}
+    L::NTuple{3,Int}
+    D::NTuple{3,Int}
+    bricks::Vector{<:Array{<:Any,3}}
+
+    function TiledField(data::KeyedArray, interpolation::Symbol, maxdim::Integer = 2048)
+        interpolation in keys(FILTER) || throw(ArgumentError("TiledField interpolation must be one of $(keys(FILTER)), got $(repr(interpolation))"))
+        k, L, D, bricks = tile_bricks(data, Int(maxdim))
+        new(data, interpolation, Int(maxdim), k, L, D, bricks)
+    end
+end
+TiledField(A::KeyedArray; interpolation = :linear, maxdim = 2048) = TiledField(A, interpolation, maxdim)
+
+function tile_bricks(A::KeyedArray, maxdim::Int)
+    coordinates(A) isa Cartesian || throw(ArgumentError("TiledField needs a Cartesian (x, y, z) grid, got $(dimnames(A))"))
+    maxdim >= 2 || throw(ArgumentError("TiledField maxdim must be at least 2, got $maxdim"))
+    n = size(A)
+    all(>(0), n) || throw(ArgumentError("TiledField axes must not be empty, got $n"))
+    k = ntuple(d -> n[d] > maxdim ? cld(n[d] - 1, maxdim - 1) : 1, 3)
+    prod(k) <= MAX_BRICKS || throw(ArgumentError("TiledField needs $(prod(k)) bricks, more than the maximum of $MAX_BRICKS"))
+    L = ntuple(d -> k[d] == 1 ? n[d] : cld(n[d] - 1, k[d]), 3)
+    D = ntuple(d -> k[d] == 1 ? n[d] : L[d] + 1, 3)
+    raw = AxisKeys.keyless_unname(A)
+    bricks = [brick_data(raw, k, L, D, _brick_coords(k, i)) for i in 0:prod(k)-1]
+    k, L, D, bricks
+end
+
+_brick_coords(k::NTuple{3,Int}, i::Int) =
+    let (b1, r) = divrem(i, k[2] * k[3]), (b2, b3) = divrem(r, k[3]); (b1, b2, b3) end
+_brick_coords(t::TiledField, i::Int) = _brick_coords(t.k, i)
+
+function _brick_axis_index(A, L::NTuple{3,Int}, D::NTuple{3,Int}, d::Int, b::Int)
+    nd = size(A, d)
+    i0 = firstindex(A, d)
+    [i0 + clamp(b * L[d] + loc, 0, nd - 1) for loc in 0:D[d]-1]
+end
+
+function brick_data(A, k::NTuple{3,Int}, L::NTuple{3,Int}, D::NTuple{3,Int}, b::NTuple{3,Int})
+    src = ntuple(d -> _brick_axis_index(A, L, D, d, b[d]), 3)
+    B = Array{eltype(A)}(undef, D)
+    for I in CartesianIndices(B)
+        B[I] = A[src[1][I[1]], src[2][I[2]], src[3][I[3]]]
+    end
+    B
+end
+brick_data(t::TiledField, b::NTuple{3,Int}) = brick_data(AxisKeys.keyless_unname(t.data), t.k, t.L, t.D, b)
+
+function _map_axis(t::TiledField, d::Int, g::Real)
+    kd, Ld, Dd = t.k[d], t.L[d], t.D[d]
+    b = clamp(floor(Int, g / Ld), 0, kd - 1)
+    l = clamp(g - b * Ld, 0.0, Dd - 1.0)
+    (b, l)
+end
+
+function Base.setproperty!(t::TiledField, name::Symbol, x)
+    if name === :data
+        if AxisKeys.keyless_unname(x) === AxisKeys.keyless_unname(t.data)
+            coordinates(x) isa Cartesian || throw(ArgumentError("TiledField needs a Cartesian (x, y, z) grid, got $(dimnames(x))"))
+            return setfield!(t, :data, x)
+        end
+        k, L, D, bricks = tile_bricks(x, t.maxdim)
+        setfield!(t, :data, x); setfield!(t, :k, k); setfield!(t, :L, L); setfield!(t, :D, D); setfield!(t, :bricks, bricks)
+        return x
+    elseif name === :maxdim
+        k, L, D, bricks = tile_bricks(t.data, Int(x))
+        setfield!(t, :maxdim, Int(x)); setfield!(t, :k, k); setfield!(t, :L, L); setfield!(t, :D, D); setfield!(t, :bricks, bricks)
+        return x
+    end
+    setfield!(t, name, convert(fieldtype(TiledField, name), x))
+end
+
+function field_glsl(t::TiledField)
+    A = t.data
+    c = coordinates(A)
+    idx = join(map((name, key) -> axis_index_glsl(key, coordvar(c, name)), dimnames(A), axiskeys(A)), ", ")
+    T, channel = value_kind(t) === :color ? ("vec4", "") : ("float", ".r")
+    L = join(map(glsl_float, t.L), ", ")
+    D = join(map(glsl_float, t.D), ", ")
+    Dmax = join(map(d -> glsl_float(d - 1), t.D), ", ")
+    kmax = join(map(k -> string(k - 1), t.k), ", ")
+    nB = length(t.bricks)
+    branches = join([i == 1 ? (nB == 1 ? "        return texture(brick_0, u)$channel;" :
+                                         "        if (bid == 0) return texture(brick_0, u)$channel;") :
+                     i < nB ? "        else if (bid == $(i - 1)) return texture(brick_$(i - 1), u)$channel;" :
+                              "        else return texture(brick_$(i - 1), u)$channel;"
+                     for i in 1:nB], "\n")
+    """
+    $T value(vec3 p) {
+        vec3 g = vec3($idx);
+        ivec3 b = clamp(ivec3(floor(g / vec3($L))), ivec3(0), ivec3($kmax));
+        vec3 l = clamp(g - vec3(b) * vec3($L), vec3(0.0), vec3($Dmax));
+        vec3 u = (l + 0.5) / vec3($D);
+        int bid = (b.x * $(t.k[2]) + b.y) * $(t.k[3]) + b.z;
+$branches
+    }
+    float stepSize(vec3 p) { return $(step_glsl(c, A)); }
+    """
+end
+
+textures(t::TiledField) = NamedTuple{ntuple(i -> Symbol(:brick_, i - 1), length(t.bricks))}(
+    ntuple(i -> Texture(t.bricks[i]; filter = t.interpolation), length(t.bricks)))
+value_kind(t::TiledField) = eltype(t.data) <: Colorant ? :color : :scalar
+value_range(t::TiledField) = data_range(t.data)
+
 # ── GLSLField ──
 
 """    GLSLField(glsl; kind = :scalar, textures = (;), uniforms = (;), value_range = 0.0..1.0)
@@ -257,7 +378,7 @@ struct Box
     z::ClosedInterval{Float64}
 end
 
-Box(g::GridField) = grid_box(coordinates(g.data), g.data)
+Box(g::Union{GridField,TiledField}) = grid_box(coordinates(g.data), g.data)
 grid_box(::Cartesian, A) =
     Box(map(k -> convert(Float64, minimum(k))..convert(Float64, maximum(k)), values(named_axiskeys(A)[(:x, :y, :z)]))...)
 grid_box(::LonLat, A) = throw(ArgumentError("Box(::GridField) needs a Cartesian (x, y, z) grid, got (lon, lat)"))
