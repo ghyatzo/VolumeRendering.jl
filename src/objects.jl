@@ -354,6 +354,87 @@ textures(f::GLSLField) = f.textures
 uniforms(f::GLSLField) = f.uniforms
 value_range(f::GLSLField) = f.value_range
 
+# ── SurfaceMesh ──
+
+"""    check_surface(surface::KeyedArray{<:Real,2})
+
+Validate a 2-D height grid: at least 2 finite, strictly monotonic coordinates on each axis, and heights that are
+finite or `NaN`. Returns `(x, y, heights)` as `Float64` arrays.
+"""
+function check_surface(surface)
+    surface isa KeyedArray{<:Real,2} ||
+        throw(ArgumentError("A surface must be a 2-D KeyedArray of heights, got $(summary(surface))"))
+    x, y = map(k -> Vector{Float64}(k), axiskeys(surface))
+    heights = Matrix{Float64}(AxisKeys.keyless_unname(surface))
+    all(>=(2), size(heights)) || throw(ArgumentError("A surface needs at least 2 samples on each axis, got $(size(heights))"))
+    for coordinates in (x, y)
+        all(isfinite, coordinates) || throw(ArgumentError("Surface coordinates must be finite"))
+        spacing = diff(coordinates)
+        (all(>(0), spacing) || all(<(0), spacing)) ||
+            throw(ArgumentError("Surface coordinates must be strictly increasing or decreasing"))
+    end
+    all(z -> isfinite(z) || isnan(z), heights) ||
+        throw(ArgumentError("Surface heights must be finite or NaN"))
+    6 * Int128(length(x) - 1) * (length(y) - 1) <= typemax(GL.GLsizei) ||
+        throw(ArgumentError("The surface has too many triangles for one OpenGL draw"))
+    x, y, heights
+end
+
+"""    SurfaceMesh(surface::KeyedArray{<:Real,2})
+
+Indexed triangle mesh of a 2-D height grid for [`HeightSurface`](@ref); cells touching a `NaN` height are omitted.
+Can be built off the render thread with no OpenGL context.
+"""
+struct SurfaceMesh
+    surface::KeyedArray
+    vertices::Matrix{Float32}
+    indices::Vector{UInt32}
+end
+
+function SurfaceMesh(surface)
+    x, y, heights = check_surface(surface)
+    nx, ny = size(heights)
+    vertices = Matrix{Float32}(undef, 3, length(heights))
+    for (j, yj) in enumerate(y), (i, xi) in enumerate(x)
+        k = i + (j - 1) * nx
+        vertices[1, k] = xi
+        vertices[2, k] = yj
+        vertices[3, k] = heights[i, j]
+    end
+    indices = UInt32[]
+    sizehint!(indices, 6 * (nx - 1) * (ny - 1))
+    for j in 1:ny-1, i in 1:nx-1
+        a = i + (j - 1) * nx
+        b, c, d = a + 1, a + nx + 1, a + nx
+        for triangle in ((a, b, c), (a, c, d))
+            all(k -> isfinite(heights[k]), triangle) || continue
+            for k in triangle
+                push!(indices, UInt32(k - 1))
+            end
+        end
+    end
+    SurfaceMesh(surface, vertices, indices)
+end
+SurfaceMesh(m::SurfaceMesh) = m
+Base.convert(::Type{SurfaceMesh}, s::KeyedArray) = SurfaceMesh(s)
+
+function _surface_value_range(surface)
+    lo, hi = Inf, -Inf
+    for z in AxisKeys.keyless_unname(surface)
+        isfinite(z) || continue
+        lo, hi = min(lo, z), max(hi, z)
+    end
+    isfinite(lo) || return (0.0, 1.0)
+    if lo == hi
+        padding = max(abs(lo), 1.0) / 100
+        return (lo - padding, hi + padding)
+    end
+    (Float64(lo), Float64(hi))
+end
+
+value_range(s::KeyedArray{<:Real,2}) = ((lo, hi) = _surface_value_range(s); lo..hi)
+value_range(m::SurfaceMesh) = value_range(m.surface)
+
 # ── built-in shapes ──
 
 """    Sphere(; center = SVector(0.0, 0.0, 0.0), radius)

@@ -740,6 +740,39 @@ end
     VR.glcheck()
 end
 
+@testitem "SurfaceMesh" begin
+    import VolumeRendering as VR
+    using AxisKeys, IntervalSets
+
+    heights = KeyedArray(Float32[10 20 30; 40 50 NaN]; x = [100, 300], y = [20, 25, 40])
+    mesh = SurfaceMesh(heights)
+    @test SurfaceMesh(mesh) === mesh
+    @test size(mesh.vertices) == (3, 6)
+    @test mesh.indices == UInt32[0, 1, 3, 0, 3, 2]
+    @test all(isfinite, mesh.vertices[:, mesh.indices .+ 1])
+    @test mesh.vertices[:, 1] == [100, 20, 10]
+    @test isempty(SurfaceMesh(KeyedArray(fill(NaN32, 2, 2); x = 1:2, y = 1:2)).indices)
+    for keys in ((1:3, 1:2), (3:-1:1, 2:-1:1))
+        full = SurfaceMesh(KeyedArray(ones(3, 2); x = keys[1], y = keys[2]))
+        @test size(full.vertices) == (3, 6) && length(full.indices) == 12 && maximum(full.indices) == 5
+    end
+    @test_throws "2-D KeyedArray" SurfaceMesh(ones(2, 2))
+    @test_throws "at least 2 samples" SurfaceMesh(KeyedArray(ones(1, 2); x = 1:1, y = 1:2))
+    @test_throws "coordinates must be finite" SurfaceMesh(KeyedArray(ones(2, 2); x = [0, Inf], y = [0, 1]))
+    @test_throws "strictly increasing or decreasing" SurfaceMesh(KeyedArray(ones(2, 2); x = [0, 0], y = [0, 1]))
+    @test_throws "heights must be finite or NaN" SurfaceMesh(KeyedArray(fill(Inf, 2, 2); x = 1:2, y = 1:2))
+
+    x, y, vals = check_surface(heights)
+    @test x == [100.0, 300.0] && y == [20.0, 25.0, 40.0] && isequal(vals, Matrix{Float64}(parent(heights)))
+    @test value_range(heights) == value_range(mesh) == 10.0..50.0
+    for val in (0f0, -20f0, 100f0)
+        r = value_range(KeyedArray(fill(val, 2, 2); x = 1:2, y = 1:2))
+        lo, hi = endpoints(r)
+        @test isfinite(lo) && isfinite(hi) && lo < val < hi
+    end
+    @test value_range(KeyedArray(fill(NaN32, 2, 2); x = 1:2, y = 1:2)) == 0.0..1.0
+end
+
 @testitem "Colormap, Mapped" begin
     using ColorSchemes
     import VolumeRendering as VR
