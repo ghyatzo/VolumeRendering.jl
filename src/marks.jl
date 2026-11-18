@@ -39,8 +39,9 @@ end
 validate(m::Mapped) = (source_kind(m.source); validate(m.colormap); m)
 
 source_kind(::Vector{<:Vector{<:Real}}) = :values
+source_kind(::Union{SurfaceMesh,KeyedArray{<:Real,2}}) = :mesh
 source_kind(f) = isfield(f) && value_kind(f) === :scalar ? :field :
-    throw(ArgumentError("Mapped source must be a :scalar field or per-vertex values (Vector{Vector{<:Real}}), got $(summary(f))"))
+    throw(ArgumentError("Mapped source must be a :scalar field, a SurfaceMesh or per-vertex values (Vector{Vector{<:Real}}), got $(summary(f))"))
 
 value_range(vals::Vector{<:Vector{<:Real}}) = nan_extrema(Iterators.flatten(vals))
 
@@ -50,7 +51,8 @@ color_kind(c::TransparentColor) =
 color_kind(::Vector{<:Vector{<:Color}}) = :vertex_colors
 color_kind(c::Vector{<:Vector{<:TransparentColor}}) =
     throw(ArgumentError("per-vertex colours must be alpha-less Colors, got $(eltype(eltype(c)))"))
-color_kind(m::Mapped) = (validate(m); source_kind(m.source) === :values ? :mapped_values : :mapped_field)
+color_kind(m::Mapped) = (validate(m); (values = :mapped_values, mesh = :mapped_mesh, field = :mapped_field)[source_kind(m.source)])
+color_kind(c::Colormap) = (validate(c); :mapped_mesh)
 color_kind(f) = isfield(f) && value_kind(f) === :color ? :color_field :
     throw(ArgumentError("a mark colour must be a Color, per-vertex Colors, a :color field or a Mapped; got $(summary(f))"))
 
@@ -126,6 +128,28 @@ Base.@kwdef mutable struct Lines
 end
 Lines(polylines; kw...) = Lines(; polylines, kw...)
 
+"""    HeightSurface(mesh; color = RGB(0.5, 0.5, 0.55), clip = nothing, shading = true, flip_depth = false,
+                     scale = SVector(1.0, 1.0, 1.0), offset = SVector(0.0, 0.0, 0.0), label = nothing)
+
+A mark drawing a 2-D heightfield [`SurfaceMesh`](@ref) (or `KeyedArray{<:Real,2}`). `color` is a constant `Color`,
+a [`Mapped`](@ref) scalar field, a `:color` field, or a `Colormap` / `Mapped(mesh, colormap)` colouring by the
+unscaled, unflipped stored height. When `clip` is a [`Box`](@ref), fragments outside it are discarded.
+"""
+Base.@kwdef mutable struct HeightSurface
+    mesh::SurfaceMesh
+    color::Any = RGB(0.5, 0.5, 0.55)
+    clip::Union{Nothing,Box} = nothing
+    shading::Bool = true
+    flip_depth::Bool = false
+    scale::SVector{3,Float64} = SVector(1.0, 1.0, 1.0)
+    offset::SVector{3,Float64} = SVector(0.0, 0.0, 0.0)
+    label::Union{Nothing,String} = nothing
+
+    HeightSurface(mesh, color, clip, shading, flip_depth, scale, offset, label) =
+        validate(new(SurfaceMesh(mesh), color, clip, shading, flip_depth, scale, offset, label))
+end
+HeightSurface(mesh; kw...) = HeightSurface(; mesh, kw...)
+
 check_shape(s, what) = isshape(s) ? s :
     throw(ArgumentError("$what must implement the shape interface (shape_glsl, bounds, aabb), got $(summary(s))"))
 
@@ -165,12 +189,21 @@ function validate(m::Lines)
     m
 end
 
+function validate(m::HeightSurface)
+    kind = color_kind(m.color)
+    kind in (:constant, :color_field, :mapped_field, :mapped_mesh) ||
+        throw(ArgumentError("a HeightSurface colour must be a constant, a :color field, a Mapped field or a Mapped SurfaceMesh / Colormap, got $kind"))
+    all(isfinite, m.scale) || throw(ArgumentError("HeightSurface scale must be finite, got $(m.scale)"))
+    all(isfinite, m.offset) || throw(ArgumentError("HeightSurface offset must be finite, got $(m.offset)"))
+    m
+end
+
 check_nesting(pervertex, polylines) = map(length, pervertex) == map(length, polylines) ||
     throw(ArgumentError("per-vertex colours/values must have the polylines' nesting and lengths"))
 
 # drives progressive refinement
 jittered(::Volume) = true
-jittered(::Union{Surface,Lines}) = false
+jittered(::Union{Surface,Lines,HeightSurface}) = false
 
 """    View(marks; camera::Camera, background = RGB(0.0, 0.0, 0.0), max_volume_px = 2048, refine_frames = 16,
          flymode = false, fly_speed)
@@ -229,8 +262,12 @@ snapshot(view::View, w, h) = (w, h, fieldvalues(view.camera)..., view.background
 snapshot(m::Volume) = (:Volume, snapshot(m.color), snapshot_shape(m.region), copy(m.extinction), m.mode, m.density, m.step_scale, m.max_samples)
 snapshot(m::Surface) = (:Surface, snapshot_shape(m.shape), snapshot(m.color), m.opacity)
 snapshot(m::Lines) = (:Lines, Identity(m.polylines), snapshot(m.color), m.width_px)
+snapshot(m::HeightSurface) = (:HeightSurface, Identity(m.mesh), snapshot(m.color), m.clip, m.shading, m.flip_depth, m.scale, m.offset)
 
 snapshot(c::Colorant) = c
+snapshot(c::Colormap) = fieldvalues(c)
+snapshot(m::SurfaceMesh) = Identity(m)
+snapshot(s::KeyedArray{<:Real,2}) = Identity(AxisKeys.keyless_unname(s))
 snapshot(pervertex::AbstractVector) = Identity(pervertex)
 snapshot(m::Mapped) = (snapshot(m.source), fieldvalues(m.colormap)...)
 snapshot(field) = snapshot_glsl(field_glsl(field), textures(field), uniforms(field))

@@ -108,6 +108,7 @@ panel_colormaps(view::View) = unique(Identity, mapreduce(m -> color_colormaps(m.
 color_fields(c::Mapped) = color_fields(c.source)
 color_fields(c) = isfield(c) ? [c] : []
 color_colormaps(c::Mapped) = [c.colormap]
+color_colormaps(c::Colormap) = [c]
 color_colormaps(_) = []
 
 # ImPlot needs its own context, bound to the host's ImGui context; created lazily on the render thread
@@ -195,6 +196,15 @@ end
 
 controls!(m::Surface) = (CImGui.SetNextItemWidth(half_width()); slider!(m, :opacity, "##opacity", 0.01, 1, "opacity: %.2f"))
 controls!(m::Lines) = (CImGui.SetNextItemWidth(half_width()); slider!(m, :width_px, "##width", 0.5, 20, "width: %.1f px"; log = true))
+function controls!(m::HeightSurface)
+    let v = checkbox("shading", m.shading)
+        isnothing(v) || (m.shading = v)
+    end
+    CImGui.SameLine()
+    let v = checkbox("flip depth", m.flip_depth)
+        isnothing(v) || (m.flip_depth = v)
+    end
+end
 
 controls!(f::Union{GridField,TiledField}) = let v = checkbox("linear interpolation", f.interpolation === :linear)
     isnothing(v) || (f.interpolation = v ? :linear : :nearest)

@@ -773,6 +773,97 @@ end
     @test value_range(KeyedArray(fill(NaN32, 2, 2); x = 1:2, y = 1:2)) == 0.0..1.0
 end
 
+@testitem "HeightSurface" setup = [GLContext] begin
+    import ModernGL as GL, VolumeRendering as VR
+    using AxisKeys, ColorSchemes, ColorTypes, FixedPointNumbers, IntervalSets, StaticArrays
+
+    heights = KeyedArray(Float32[10 20 30; 40 50 NaN]; x = [100, 300], y = [20, 25, 40])
+    mesh = SurfaceMesh(heights)
+    hs = HeightSurface(heights)
+    @test hs.mesh isa SurfaceMesh && hs.shading && !hs.flip_depth && isnothing(hs.clip)
+    @test applicable(VR.controls!, hs) && !VR.jittered(hs)
+    @test_throws "HeightSurface scale" HeightSurface(mesh; scale = SVector(1.0, Inf, 1.0))
+    @test_throws "HeightSurface offset" HeightSurface(mesh; offset = SVector(NaN, 0.0, 0.0))
+    @test_throws "HeightSurface colour" HeightSurface(mesh; color = [[RGB(1.0, 0.0, 0.0)]])
+
+    # pixel-level rendering: opaque color, field sampling, box clipping, and VBO reuse
+    w = 80
+    xyz = -1.0:0.25:1.0
+    A = KeyedArray(Float32[10 + x + 2y + 3z for x in xyz, y in xyz, z in xyz]; x = xyz, y = xyz, z = xyz)
+    gf = GridField(A)
+    tf = TiledField(A; maxdim = 6)
+    cmap = Colormap(ColorSchemes.viridis, value_range(gf))
+    box = Box(gf)
+    flat = KeyedArray(zeros(Float32, 2, 2); x = -2:4:2, y = -2:4:2)
+    top = GLContext.topcam(1.5)
+    buffers(mark) = (v = View([mark]; camera = top, refine_frames = 1); (render_image(v, w, w), VR.depth_image(v, w, w), v))
+
+    mark = HeightSurface(flat; color = RGB(1.0, 0.0, 0.0), clip = box, shading = false)
+    img, dep, view = buffers(mark)
+    ref_img, ref_dep, _ = buffers(Surface(Plane(:z, 0.0, box); color = Mapped(gf, cmap)))
+    @test dep ≈ ref_dep rtol = 1e-6
+    inside = dep .> 0
+    @test any(inside) && !all(inside)
+    @test all(==(RGB{N0f8}(1, 0, 0)), img[inside]) && all(==(RGB{N0f8}(0, 0, 0)), img[.!inside])
+    mbuf = only(filter(x -> x isa VR.MeshBuffer, collect(values(view.cache.entries))))
+    mark.color = Mapped(gf, cmap)
+    sampled_img, sampled_dep = render_image(view, w, w), VR.depth_image(view, w, w)
+    @test sampled_dep == dep
+    @test maximum(map((a, b) -> max(abs(Int(reinterpret(a.r)) - Int(reinterpret(b.r))),
+                                    abs(Int(reinterpret(a.g)) - Int(reinterpret(b.g))),
+                                    abs(Int(reinterpret(a.b)) - Int(reinterpret(b.b)))), sampled_img, ref_img)) <= 1
+    @test only(filter(x -> x isa VR.MeshBuffer, collect(values(view.cache.entries)))) === mbuf   # mesh buffer reused
+    tiled_img, tiled_dep, _ = buffers(HeightSurface(flat; color = Mapped(tf, cmap), clip = box, shading = false))
+    @test (tiled_img, tiled_dep) == (sampled_img, sampled_dep)
+
+    # slope shading, scale exaggeration, flip_depth, and viewing from below
+    roof = KeyedArray(Float32[0 0; 0.5 0.5; 0 0]; x = -1:1, y = -1:2:1)
+    rmark = HeightSurface(roof; clip = box)
+    rview = View([rmark]; camera = top, refine_frames = 1)
+    shaded, rdep = render_image(rview, w, w), VR.depth_image(rview, w, w)
+    r8(c) = Int(reinterpret(c.r))
+    @test r8(shaded[40, 50]) > r8(shaded[40, 30]) + 10
+    rmark.shading = false
+    unlit, unlit_dep = render_image(rview, w, w), VR.depth_image(rview, w, w)
+    @test unlit_dep == rdep && r8(unlit[40, 30]) == r8(unlit[40, 50]) && shaded != unlit
+    rmark.shading = true; rmark.scale = SVector(1.0, 1.0, 2.0)
+    exag = render_image(rview, w, w)
+    @test r8(exag[40, 50]) - r8(exag[40, 30]) > r8(shaded[40, 50]) - r8(shaded[40, 30])
+    rmark.scale = SVector(1.0, 1.0, 1.0); rmark.flip_depth = true
+    flipped = render_image(rview, w, w)
+    @test r8(flipped[40, 30]) > r8(flipped[40, 50]) + 10
+    rmark.flip_depth = false
+    rview.camera.eye = -rview.camera.eye
+    below, below_dep = render_image(rview, w, w), VR.depth_image(rview, w, w)
+    @test any(>(0), below_dep) && all(c -> r8(c) >= 40, below[below_dep .> 0])
+
+    # height-value coloring (Mapped(mesh, cmap) and Colormap): flip_depth flips depth and geometry while keeping value colors
+    vcmap = Colormap(ColorSchemes.gray1, 0.0..0.5)
+    vmark = HeightSurface(roof; color = Mapped(rmark.mesh, vcmap), shading = false)
+    vview = View([vmark]; camera = top, refine_frames = 1)
+    vimg1, vdep1 = render_image(vview, w, w), VR.depth_image(vview, w, w)
+    vmark.flip_depth = true
+    vimg2, vdep2 = render_image(vview, w, w), VR.depth_image(vview, w, w)
+    @test vimg1 == vimg2 && vdep1 != vdep2
+    vmark.color = vcmap
+    @test render_image(vview, w, w) == vimg1
+
+    # depth sign clipping, all-NaN surface, and ResourceCache cleanup on removal
+    neg_box = Box(-1..1, -1..1, -1..0)
+    dmark = HeightSurface(KeyedArray(fill(0.5f0, 2, 2); x = -1:2:1, y = -1:2:1); clip = neg_box)
+    dview = View([dmark]; camera = top, refine_frames = 1)
+    @test all(iszero, VR.depth_image(dview, w, w))
+    dmark.flip_depth = true
+    @test any(>(0), VR.depth_image(dview, w, w))
+    dmark.mesh = KeyedArray(fill(NaN32, 2, 2); x = -1:2:1, y = -1:2:1)
+    @test all(iszero, VR.depth_image(dview, w, w)) && isempty(dmark.mesh.indices)
+    buf = only(filter(x -> x isa VR.MeshBuffer, collect(values(dview.cache.entries))))
+    empty!(dview.marks)
+    render!(dview, w, w)
+    @test GL.glIsBuffer(buf.vbo) == GL.GL_FALSE && GL.glIsBuffer(buf.ebo) == GL.GL_FALSE
+    VR.glcheck()
+end
+
 @testitem "Colormap, Mapped" begin
     using ColorSchemes
     import VolumeRendering as VR

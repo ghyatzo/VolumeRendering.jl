@@ -15,7 +15,7 @@ using IntervalSets: ClosedInterval, endpoints, (..)
 using LinearAlgebra: cross, dot, norm, normalize
 using StaticArrays: SVector, SMatrix, @SMatrix, setindex
 
-export View, Camera, Volume, Surface, SurfaceMesh, check_surface, Lines, Sphere, Box, Plane, Clipped,
+export View, Camera, Volume, Surface, HeightSurface, SurfaceMesh, check_surface, Lines, Sphere, Box, Plane, Clipped,
        GridField, TiledField, GLSLField, Texture, Colormap, Mapped, reset!,
        field_glsl, value_kind, textures, uniforms, value_range, axis_index_glsl, shape_glsl, bounds, aabb,
        orbit!, flylook!, pan!, zoom!, fly!, view_proj, render!, render_image, free!,

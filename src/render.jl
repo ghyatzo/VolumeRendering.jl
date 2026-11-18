@@ -208,6 +208,46 @@ const LINES_BODY = """
     }
     """
 
+const HEIGHT_VERT = """
+    #version 410 core
+    layout(location = 0) in vec3 vr_vert;
+    uniform mat4 vr_viewproj;
+    uniform vec3 vr_scale, vr_offset;
+    uniform int vr_flip_depth;
+    out vec3 vr_pos;
+    out float vr_height;
+    void main() {
+        vr_height = vr_vert.z;
+        vec3 p = vr_vert;
+        if (vr_flip_depth == 1) p.z = -p.z;
+        vr_pos = p * vr_scale + vr_offset;
+        gl_Position = vr_viewproj * vec4(vr_pos, 1.0);
+    }
+    """
+
+const HEIGHT_DECLS = """
+    in vec3 vr_pos;
+    in float vr_height;
+    uniform int vr_has_clip, vr_shading;
+    uniform vec3 vr_clip_lo, vr_clip_hi, vr_light;
+    """
+
+const HEIGHT_BODY = """
+    void main() {
+        vec3 normal = cross(dFdx(vr_pos), dFdy(vr_pos));
+        if (vr_has_clip == 1 && (any(lessThan(vr_pos, vr_clip_lo)) || any(greaterThan(vr_pos, vr_clip_hi)))) discard;
+        float t = vr_t(vr_pos); if (t <= 0.0) discard;
+        vec3 col = vr_color(vr_pos).rgb;
+        if (vr_shading == 1) {
+            float nlen = length(normal);
+            float diffuse = nlen > 0.0 ? abs(dot(normal / nlen, vr_light)) : 1.0;
+            col *= 0.35 + 0.65 * diffuse;
+        }
+        vr_frag = vec4(col, 1.0);
+        gl_FragDepth = vr_near / t;
+    }
+    """
+
 # ── colour sources ──
 
 # GLSL-bearing objects of a program, in declaration order (field before shape)
@@ -238,9 +278,11 @@ color_source(c::Color) =
     source_parts("vec4 vr_color(vec3 p) { return vec4(vr_rgb, 1.0); }\n"; decls = "uniform vec3 vr_rgb;\n", uniforms = (; vr_rgb = rgb32(c)))
 color_source(c::Vector{<:Vector{<:Color}}) = vertex_parts(c, "vec4 vr_color(vec3 p) { return vec4(mix(vr_va, vr_vb, vr_seg_u(p)), 1.0); }\n")
 color_source(m::Mapped) = mapped_source(m.source, m.colormap)
+color_source(c::Colormap) = source_parts(mapped_bridge("vr_height"); colormap = c)
 color_source(f) = source_parts("vec4 vr_color(vec3 p) { return value(p); }\n"; objects = [field_part(f)])   # :color field (validated)
 
 mapped_source(vals::Vector{<:Vector{<:Real}}, colormap) = vertex_parts(vals, mapped_bridge("mix(vr_va, vr_vb, vr_seg_u(p))"); colormap)
+mapped_source(::Union{SurfaceMesh,KeyedArray{<:Real,2}}, colormap) = source_parts(mapped_bridge("vr_height"); colormap)
 mapped_source(f, colormap) = source_parts(mapped_bridge("value(p)"); objects = [field_part(f)], colormap)
 
 # ── colormap ──
@@ -385,6 +427,19 @@ function assemble(m::Lines, (; camera, w, h))
     [:opaque => Draw(lines_vert(color.payload), frag, merge(frame_uniforms(camera, w, h), uniforms, engine), units, buffer)]
 end
 
+function assemble(m::HeightSurface, (; camera, w, h))
+    color = color_source(m.color)
+    (; frag, uniforms, units) = assemble_fragment(color, color.objects, HEIGHT_DECLS, HEIGHT_BODY)
+    right, up, fwd = view_basis(camera)
+    clip_lo, clip_hi = isnothing(m.clip) ? (SVector(0.0, 0.0, 0.0), SVector(0.0, 0.0, 0.0)) : (aabb(m.clip).lo, aabb(m.clip).hi)
+    engine = (; vr_viewproj = view_proj(camera, w / h), vr_scale = m.scale, vr_offset = m.offset,
+                vr_flip_depth = m.flip_depth ? 1 : 0, vr_shading = m.shading ? 1 : 0,
+                vr_has_clip = isnothing(m.clip) ? 0 : 1, vr_clip_lo = clip_lo, vr_clip_hi = clip_hi,
+                vr_light = normalize(-fwd + 0.5 * right + 0.8 * up))
+    buffer = Identity(m.mesh) => () -> MeshBuffer(m.mesh.vertices, m.mesh.indices)
+    [:opaque => Draw(HEIGHT_VERT, frag, merge(frame_uniforms(camera, w, h), uniforms, engine), units, buffer)]
+end
+
 # march into vol_fb at vsize (same aspect w/h), then composite over the scene
 function assemble(m::Volume, (; camera, w, h, vsize, sample))
     color = color_source(m.color)
@@ -443,8 +498,9 @@ function draw!(cache::ResourceCache, d::Draw)
 end
 
 draw_strip!(cache, ::Nothing) = (GL.glBindVertexArray(cache.empty_vao); GL.glDrawArrays(GL.GL_TRIANGLE_STRIP, 0, 4))
-draw_strip!(cache, (key, _)::Pair) =
-    (b = cache.entries[key]; GL.glBindVertexArray(b.vao); GL.glDrawArraysInstanced(GL.GL_TRIANGLE_STRIP, 0, 4, b.n))
+draw_strip!(cache, (key, _)::Pair) = draw_buffer!(cache.entries[key])
+draw_buffer!(b::InstanceBuffer) = (GL.glBindVertexArray(b.vao); GL.glDrawArraysInstanced(GL.GL_TRIANGLE_STRIP, 0, 4, b.n))
+draw_buffer!(b::MeshBuffer) = b.n > 0 && (GL.glBindVertexArray(b.vao); GL.glDrawElements(GL.GL_TRIANGLES, b.n, GL.GL_UNSIGNED_INT, C_NULL))
 
 function opaque_pass!(cache::ResourceCache, draws, background, w, h)
     GL.glBindFramebuffer(GL.GL_FRAMEBUFFER, cache.scene_fb.fbo)

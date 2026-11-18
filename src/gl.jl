@@ -169,6 +169,30 @@ end
 
 gl_delete(b::InstanceBuffer) = (GL.glDeleteVertexArrays(1, Ref(b.vao)); GL.glDeleteBuffers(1, Ref(b.vbo)))
 
+# ── indexed triangle mesh buffers ──
+
+struct MeshBuffer
+    vao::GL.GLuint
+    vbo::GL.GLuint
+    ebo::GL.GLuint
+    n::Int
+end
+
+function MeshBuffer(vertices::Matrix{Float32}, indices::Vector{UInt32})
+    buf = MeshBuffer(gen(GL.glGenVertexArrays), gen(GL.glGenBuffers), gen(GL.glGenBuffers), length(indices))
+    GL.glBindVertexArray(buf.vao)
+    GL.glBindBuffer(GL.GL_ARRAY_BUFFER, buf.vbo)
+    GL.glBufferData(GL.GL_ARRAY_BUFFER, sizeof(vertices), vertices, GL.GL_STATIC_DRAW)
+    GL.glBindBuffer(GL.GL_ELEMENT_ARRAY_BUFFER, buf.ebo)
+    GL.glBufferData(GL.GL_ELEMENT_ARRAY_BUFFER, sizeof(indices), isempty(indices) ? C_NULL : indices, GL.GL_STATIC_DRAW)
+    GL.glEnableVertexAttribArray(0)
+    GL.glVertexAttribPointer(0, 3, GL.GL_FLOAT, GL.GL_FALSE, 3 * sizeof(Float32), C_NULL)
+    GL.glBindVertexArray(0)
+    buf
+end
+
+gl_delete(b::MeshBuffer) = (GL.glDeleteVertexArrays(1, Ref(b.vao)); GL.glDeleteBuffers(1, Ref(b.vbo)); GL.glDeleteBuffers(1, Ref(b.ebo)))
+
 # ── framebuffers ──
 
 struct Framebuffer{T}
