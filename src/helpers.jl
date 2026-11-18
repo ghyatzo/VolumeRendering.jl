@@ -55,6 +55,24 @@ function axis_lines(center, radius)
        colors = [fill(c, 2) for c in (RGB(1.0, 0.0, 0.0), RGB(0.0, 1.0, 0.0), RGB(0.0, 0.0, 1.0))])
 end
 
+"""    radial_planes(box::Box; center = SVector(0.0, 0.0), nslices = 8, offset = 0.0)
+
+Vertical half-sheet planes starting at `(center[1], center[2])`, evenly spaced in angle from `offset` (radians) and
+clipped to `box`, for `[Surface(p; color) for p in radial_planes(box)]`.
+"""
+function radial_planes(box::Box; center = SVector(0.0, 0.0), nslices::Integer = 8, offset = 0.0)
+    nslices >= 1 || throw(ArgumentError("radial_planes nslices must be at least 1, got $nslices"))
+    c = SVector{2,Float64}(center)
+    all(isfinite, c) || throw(ArgumentError("radial_planes center must be finite, got $center"))
+    θ0 = convert(Float64, offset)
+    isfinite(θ0) || throw(ArgumentError("radial_planes offset must be finite, got $offset"))
+    (; lo, hi) = aabb(box)
+    r = hypot(max(abs(lo[1] - c[1]), abs(hi[1] - c[1])), max(abs(lo[2] - c[2]), abs(hi[2] - c[2])))
+    [let (s, co) = sincos(θ)
+         Clipped(Plane(SVector(c[1], c[2], lo[3]), SVector(co, s, 0.0) * r, SVector(0.0, 0.0, hi[3] - lo[3])), box)
+     end for θ in range(; start = θ0, step = 2π / nslices, length = nslices)]
+end
+
 """    VectorField(f; region::Box)
 
 A vector field over `region`, for [`streamlines`](@ref): `f(p::SVector{3,Float64})` returns the vector at `p`.

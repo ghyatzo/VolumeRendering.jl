@@ -695,6 +695,51 @@ end
     VR.glcheck()
 end
 
+@testitem "radial_planes" setup = [GLContext] begin
+    import ModernGL as GL, VolumeRendering as VR
+    using AxisKeys, ColorSchemes, ColorTypes, FixedPointNumbers, IntervalSets, StaticArrays, Unitful
+
+    box = Box(-1..1, -1..1, -1..1)
+    rad = radial_planes(box; center = (0.25, -0.5), nslices = 4, offset = 30u"°")
+    rad_ref = radial_planes(box; center = (0.25, -0.5), nslices = 4, offset = π / 6)
+    @test length(rad) == 4 && all(((a, b),) -> a.shape.origin ≈ b.shape.origin && a.shape.u ≈ b.shape.u && a.shape.v ≈ b.shape.v, zip(rad, rad_ref))
+    r0 = first(radial_planes(box; center = (0.25, -0.5), nslices = 4, offset = 0.0)).shape
+    @test r0.origin == [0.25, -0.5, -1] && r0.u[1] > 0 && r0.u[2] == r0.u[3] == 0 && r0.v == [0, 0, 2]
+    @test_throws "at least 1" radial_planes(box; nslices = 0)
+    @test_throws "offset must be finite" radial_planes(box; offset = Inf)
+    @test_throws "center must be finite" radial_planes(box; center = (NaN, 0.0))
+
+    w = 80
+    xyz = -1.0:0.1:1.0
+    A = KeyedArray(Float32[x + 2y + 3z + 10 for x in xyz, y in xyz, z in xyz]; x = xyz, y = xyz, z = xyz)
+    gf = GridField(A)
+    tf = TiledField(A; maxdim = 12)
+    cmap = Colormap(ColorSchemes.viridis, value_range(gf))
+    rcam = Camera(SVector(0.0, 3.0, 0.0), SVector(0.0, 0.0, 0.0), SVector(0.0, 0.0, 1.0), :ortho, 45.0, 1.5)
+    right, up, _ = VR.view_basis(rcam)
+    xs = [((col - 0.5) / w * 2 - 1) * rcam.ortho_half for col in 1:w]
+    ys = [(1 - (row - 0.5) / w * 2) * rcam.ortho_half for row in 1:w]
+    pts = [rcam.lookat + x * right + y * up for y in ys, x in xs]
+    buffers(marks) = (v = View(marks; camera = rcam, refine_frames = 1); (render_image(v, w, w), VR.depth_image(v, w, w)))
+
+    r1 = [Surface(p; color = Mapped(gf, cmap)) for p in radial_planes(box; center = (0.25, -0.2), nslices = 1)]
+    @test (buffers(r1)[2] .> 0) == map(p -> 0.25 <= p[1] <= 1 && abs(p[3]) <= 1, pts)
+    r1_pi = [Surface(p; color = Mapped(gf, cmap)) for p in radial_planes(box; center = (0.25, -0.2), nslices = 1, offset = π)]
+    @test (buffers(r1_pi)[2] .> 0) == map(p -> -1 <= p[1] <= 0.25 && abs(p[3]) <= 1, pts)
+    r2 = [Surface(p; color = Mapped(gf, cmap)) for p in radial_planes(box; center = (0.25, -0.2), nslices = 2)]
+    r2_img, r2_dep = buffers(r2)
+    full_img, full_dep = buffers([Surface(Plane(:y, -0.2, box); color = Mapped(gf, cmap))])
+    @test r2_dep ≈ full_dep
+    @test maximum(map((a, b) -> max(abs(Int(reinterpret(a.r)) - Int(reinterpret(b.r))),
+                                    abs(Int(reinterpret(a.g)) - Int(reinterpret(b.g))),
+                                    abs(Int(reinterpret(a.b)) - Int(reinterpret(b.b)))), r2_img, full_img)) <= 1
+    r3_planes = radial_planes(box; center = (0.25, -0.2), nslices = 3, offset = π / 5)
+    r3_buf = buffers([Surface(p; color = Mapped(gf, cmap)) for p in r3_planes])
+    @test r3_buf != (r2_img, r2_dep)
+    @test buffers([Surface(p; color = Mapped(tf, cmap)) for p in r3_planes]) == r3_buf
+    VR.glcheck()
+end
+
 @testitem "Colormap, Mapped" begin
     using ColorSchemes
     import VolumeRendering as VR
